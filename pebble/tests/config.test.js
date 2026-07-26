@@ -1,4 +1,4 @@
-const { defaultSettings, buildConfigUrl, parseConfigResponse } =
+const { defaultSettings, buildConfigUrl, parseConfigResponse, extractCredentials } =
   require('../src/pkjs/config');
 
 test('defaults are safe for a fresh install', () => {
@@ -110,4 +110,57 @@ test('showAlertVisuals "false" string resolves to false', () => {
 test('vibrateEnabled "0" string resolves to false', () => {
   const s = parseConfigResponse(JSON.stringify({ vibrateEnabled: '0' }));
   expect(s.vibrateEnabled).toBe(false);
+});
+
+// --- credentials --------------------------------------------------------
+//
+// The config page cannot exchange credentials for a token itself (FireBoard
+// sends no CORS headers), so it forwards them to pkjs. They must reach the
+// login call WITHOUT ever passing through the settings object, which is what
+// gets written to localStorage.
+
+test('the settings merge never carries a password', () => {
+  const s = parseConfigResponse(JSON.stringify({
+    email: 'a@b.com', password: 'hunter2', layout: 1,
+  }));
+  expect(s.password).toBeUndefined();
+  expect(s.email).toBeUndefined();
+  expect(JSON.stringify(s)).not.toContain('hunter2');
+  expect(JSON.stringify(s)).not.toContain('a@b.com');
+  expect(s.layout).toBe(1);              // the rest of the save still applies
+});
+
+test('a password in the response cannot become the token', () => {
+  const previous = Object.assign(defaultSettings(), { token: 'old' });
+  const s = parseConfigResponse(JSON.stringify({
+    email: 'a@b.com', password: 'hunter2',
+  }), previous);
+  expect(s.token).toBe('old');
+});
+
+test('extractCredentials pulls the pair out of the raw response', () => {
+  expect(extractCredentials(JSON.stringify({
+    email: 'a@b.com', password: 'hunter2', layout: 1,
+  }))).toEqual({ email: 'a@b.com', password: 'hunter2' });
+});
+
+test('extractCredentials returns null when either half is missing', () => {
+  expect(extractCredentials(JSON.stringify({ email: 'a@b.com' }))).toBeNull();
+  expect(extractCredentials(JSON.stringify({ password: 'hunter2' }))).toBeNull();
+  expect(extractCredentials(JSON.stringify({ email: '', password: '' }))).toBeNull();
+  expect(extractCredentials(JSON.stringify({ layout: 1 }))).toBeNull();
+});
+
+test('extractCredentials refuses a sign-out', () => {
+  // A sign-out must never be turned into a login attempt with stale field
+  // values left in the form.
+  expect(extractCredentials(JSON.stringify({
+    signOut: true, email: 'a@b.com', password: 'hunter2',
+  }))).toBeNull();
+});
+
+test('extractCredentials survives a malformed response', () => {
+  expect(extractCredentials('not json')).toBeNull();
+  expect(extractCredentials('null')).toBeNull();
+  expect(extractCredentials('"a string"')).toBeNull();
 });

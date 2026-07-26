@@ -16,9 +16,18 @@ const POLL_SEC = 60;
 // FUNCTION so each poll gets a payload timestamped at that poll's clock.
 const mockApi = { devices: () => [], error: null };
 
+// The login exchange moved out of the config page and into pkjs because
+// FireBoard sends no CORS headers. `loginCalls` records what index.js hands
+// over so the credential-handling tests can assert on it.
+const mockLogin = { error: null, token: 'tok-from-login', calls: [] };
+
 jest.mock('../src/pkjs/fireboard', () => ({
   Client: function Client() {
     this.getDevices = function (cb) { cb(mockApi.error, mockApi.devices()); };
+  },
+  login: function (username, password, cb) {
+    mockLogin.calls.push({ username, password });
+    cb(mockLogin.error, mockLogin.error ? null : mockLogin.token);
   },
 }));
 
@@ -41,6 +50,9 @@ function boot(s) {
   store = { 'fb.settings': JSON.stringify(settings(s)) };
   mockApi.error = null;
   mockApi.devices = () => [];
+  mockLogin.error = null;
+  mockLogin.token = 'tok-from-login';
+  mockLogin.calls = [];
 
   global.Pebble = {
     addEventListener: (name, fn) => { handlers[name] = fn; },
@@ -382,4 +394,125 @@ test('a sign-out actually clears the stored token', () => {
   stranded();
   saveSettings({ signOut: true });
   expect(JSON.parse(store['fb.settings']).token).toBe('');
+});
+
+// --- credentials arrive from the config page and are exchanged here ---------
+//
+// The config page is served from github.io and FireBoard sends no CORS headers,
+// so the page cannot do the token exchange itself. It forwards the credentials
+// in the close payload and pkjs performs the exchange. The password therefore
+// transits the payload -- an accepted tradeoff -- which makes everything about
+// its handling on THIS side load-bearing: it must never be persisted, never be
+// retained, and never be logged.
+
+const CREDS = { email: 'a@b.com', password: 'hunter2' };
+
+test('THE PERSISTED SETTINGS CONTAIN NO CREDENTIAL', () => {
+  boot({ token: '' });
+  saveSettings(Object.assign({ layout: 1 }, CREDS));
+
+  const persisted = store['fb.settings'];
+  // The literal secrets, in any position, in any key.
+  expect(persisted).not.toContain('hunter2');
+  expect(persisted).not.toContain('a@b.com');
+  const parsed = JSON.parse(persisted);
+  expect(parsed.password).toBeUndefined();
+  expect(parsed.email).toBeUndefined();
+  expect(Object.keys(parsed)).not.toContain('password');
+  // ...and the save itself still took effect, so this is not passing by
+  // accident of nothing having been written.
+  expect(parsed.layout).toBe(1);
+  expect(parsed.token).toBe('tok-from-login');
+});
+
+test('a failed sign-in persists no credential either', () => {
+  boot({ token: '' });
+  mockLogin.error = { kind: 'bad_token' };
+  saveSettings(Object.assign({ layout: 1 }, CREDS));
+  expect(store['fb.settings']).not.toContain('hunter2');
+  expect(store['fb.settings']).not.toContain('a@b.com');
+});
+
+test('the password is never written to the log', () => {
+  const spy = jest.spyOn(console, 'log').mockImplementation(() => {});
+  try {
+    boot({ token: '' });
+    mockLogin.error = { kind: 'bad_token' };
+    saveSettings(Object.assign({ layout: 1 }, CREDS));
+    const logged = spy.mock.calls.map((c) => c.join(' ')).join('\n');
+    expect(logged).not.toContain('hunter2');
+    expect(logged).not.toContain('a@b.com');
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+test('credentials are exchanged for a token and the loop starts', () => {
+  boot({ token: '' });
+  mockApi.devices = deviceFn({ channels: [ch(1, 'pit', 200)] });
+  saveSettings(Object.assign({ layout: 0 }, CREDS));
+  expect(mockLogin.calls).toEqual([{ username: 'a@b.com', password: 'hunter2' }]);
+  jest.advanceTimersByTime(60000);
+  expect(last().N_PROBES).toBe(1);
+});
+
+test('a sign-in clears a dead token', () => {
+  const stopped = stranded();
+  saveSettings(CREDS);
+  jest.advanceTimersByTime(60000);
+  expect(sent.length).toBeGreaterThan(stopped);
+  expect(last().N_PROBES).toBe(1);
+  expect(JSON.parse(store['fb.settings']).token).toBe('tok-from-login');
+});
+
+test('a WAF throttle is not reported as a credentials failure', () => {
+  // 405 + HTML from the AWS WAF means "come back later", not "wrong password".
+  // Telling the user to sign in again sends them straight back into the wall.
+  boot({ token: '' });
+  mockLogin.error = { kind: 'waf' };
+  saveSettings(CREDS);
+  expect(last().BANNER).toBe('TRY AGAIN LATER');
+  expect(JSON.parse(store['fb.settings']).token).toBe('');
+});
+
+test('rejected credentials ask the user to sign in again', () => {
+  boot({ token: '' });
+  mockLogin.error = { kind: 'bad_token' };
+  saveSettings(CREDS);
+  expect(last().BANNER).toBe('SIGN IN AGAIN');
+  expect(JSON.parse(store['fb.settings']).token).toBe('');
+});
+
+test('a transport failure during sign-in reports NO SIGNAL', () => {
+  boot({ token: '' });
+  mockLogin.error = { kind: 'network' };
+  saveSettings(CREDS);
+  expect(last().BANNER).toBe('NO SIGNAL');
+  expect(JSON.parse(store['fb.settings']).token).toBe('');
+});
+
+test('a failed sign-in leaves an existing working token in place', () => {
+  boot({ token: 'tok' });
+  mockApi.devices = deviceFn({ channels: [ch(1, 'pit', 200)] });
+  nextPoll();
+  mockLogin.error = { kind: 'waf' };
+  saveSettings(CREDS);
+  expect(JSON.parse(store['fb.settings']).token).toBe('tok');
+  // The loop is still alive on the old token.
+  jest.advanceTimersByTime(60000);
+  expect(last().N_PROBES).toBe(1);
+});
+
+test('a sign-out still signs out and attempts no login', () => {
+  boot({ token: 'tok' });
+  saveSettings({ signOut: true });
+  expect(mockLogin.calls).toEqual([]);
+  expect(JSON.parse(store['fb.settings']).token).toBe('');
+});
+
+test('a settings-only save attempts no login', () => {
+  boot({ token: 'tok' });
+  saveSettings({ layout: 2 });
+  expect(mockLogin.calls).toEqual([]);
+  expect(JSON.parse(store['fb.settings']).token).toBe('tok');
 });

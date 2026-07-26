@@ -377,6 +377,13 @@ Pebble.addEventListener('webviewclosed', function (e) {
   // An explicit sign-out arrives as `signOut: true`, not as an empty token.
   var raw = decodeURIComponent(e.response);
   var updated = configMod.parseConfigResponse(raw, state.settings);
+  // Read the credentials out of the RAW response, not out of `updated`.
+  // parseConfigResponse has no idea these keys exist and `updated` is what gets
+  // written to localStorage -- keeping the two apart is the whole reason the
+  // password never reaches disk. `creds` is a local: it is passed to login(),
+  // used once, and goes out of scope with this handler. Nothing about it is
+  // copied onto `state`, and it is never logged, here or in any error path.
+  var creds = configMod.extractCredentials(raw);
   state.settings = updated;
   saveSettings(updated);
   state.history.reset();
@@ -396,6 +403,43 @@ Pebble.addEventListener('webviewclosed', function (e) {
   if (credentialChanged(raw)) {
     state.tokenDead = false;
   }
+
+  // The config page cannot do this exchange itself: it is served from
+  // github.io and FireBoard sends no CORS headers, so the browser blocks the
+  // response. pkjs has no browser origin and is not subject to CORS, so the
+  // page hands the credentials over and the exchange happens here.
+  if (creds) {
+    var gen = state.generation;
+    sendStatus('SIGNING IN', false);
+    stopTimer();
+    fireboard.login(creds.email, creds.password, function (err, token) {
+      // A later reconfiguration supersedes this one; its own handler owns the
+      // timer and the token now.
+      if (gen !== state.generation) return;
+      if (err) {
+        // Only the KIND is logged. The password is not in scope of this log
+        // line, is not on `err`, and must never be added to either.
+        console.log('login failed: ' + err.kind);
+        sendStatus(bannerForError(err.kind), false);
+        // No token is persisted on failure -- state.settings is untouched, so
+        // whatever token was already stored (if any) stays exactly as it was.
+        rebuild();
+        // With a usable token the loop resumes and will replace the banner
+        // with real data. With none there is nothing to poll, so stay stopped
+        // and leave the failure on screen instead of overwriting it with the
+        // generic SIGN IN prompt one tick later.
+        if (state.settings.token) restartTimer();
+        return;
+      }
+      state.settings.token = token;
+      state.tokenDead = false;
+      saveSettings(state.settings);
+      rebuild();
+      restartTimer();
+    });
+    return;
+  }
+
   rebuild();
   restartTimer();
 });

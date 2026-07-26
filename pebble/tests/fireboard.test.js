@@ -44,7 +44,8 @@ function fakeXhr(response) {
       getResponseHeader(k) {
         return k.toLowerCase() === 'content-type' ? response.contentType : null;
       },
-      send() {
+      send(body) {
+        this.body = body;
         this.status = response.status;
         this.responseText = response.body;
         if (response.networkError) { this.onerror(); } else { this.onload(); }
@@ -102,6 +103,112 @@ test('reports a network failure', (done) => {
   const client = makeClient({ networkError: true });
   client.getDevices((err) => {
     expect(err.kind).toBe('network');
+    done();
+  });
+});
+
+// --- login -------------------------------------------------------------
+//
+// The token exchange lives here rather than in the config page because
+// FireBoard's login endpoint sends no CORS headers, so a browser XHR from
+// github.io can never read the response. pkjs has no origin and is not
+// subject to CORS.
+
+const { classifyLogin, login } = require('../src/pkjs/fireboard');
+
+test('classifyLogin calls a rejected credential a bad token', () => {
+  expect(classifyLogin(400, 'application/json',
+    '{"non_field_errors":["Unable to log in with provided credentials."]}'))
+    .toBe('bad_token');
+  expect(classifyLogin(401, 'application/json', '{"detail":"x"}')).toBe('bad_token');
+});
+
+test('classifyLogin calls the WAF captcha a WAF, not a bad credential', () => {
+  // The login endpoint sits behind an AWS WAF that throttles with 405 + HTML.
+  // Reporting that as a credentials failure sends the user round the sign-in
+  // loop forever while the door is being held shut for reasons of their own.
+  expect(classifyLogin(405, 'text/html',
+    '<html><body>Human Verification</body></html>')).toBe('waf');
+});
+
+test('classifyLogin leaves a healthy response alone', () => {
+  expect(classifyLogin(200, 'application/json', '{"key":"t"}')).toBe('ok');
+});
+
+// The stub calls back synchronously from inside send(), so `captured` is
+// exposed through a box the callback can read while login() is still running.
+const box = {};
+
+function loginWith(response, cb) {
+  const Xhr = fakeXhr(response);
+  login('a@b.com', 'hunter2', cb, {
+    xhrFactory: function () { box.xhr = new Xhr(); return box.xhr; },
+    userAgent: 'pebble-fireboard/0.1',
+  });
+}
+
+test('login posts JSON credentials with a User-Agent', (done) => {
+  loginWith(
+    { status: 200, contentType: 'application/json', body: '{"key":"tok-123"}' },
+    (err, token) => {
+      const xhr = box.xhr;
+      expect(err).toBeNull();
+      expect(token).toBe('tok-123');
+      expect(xhr.method).toBe('POST');
+      expect(xhr.url).toBe('https://fireboard.io/api/rest-auth/login/');
+      expect(xhr.headers['User-Agent']).toBe('pebble-fireboard/0.1');
+      expect(xhr.headers['Content-Type']).toBe('application/json');
+      expect(JSON.parse(xhr.body)).toEqual({
+        username: 'a@b.com', password: 'hunter2',
+      });
+      done();
+    });
+});
+
+test('login reports rejected credentials as bad_token', (done) => {
+  loginWith({
+    status: 400, contentType: 'application/json',
+    body: '{"non_field_errors":["Unable to log in with provided credentials."]}',
+  }, (err, token) => {
+    expect(err.kind).toBe('bad_token');
+    expect(token).toBeNull();
+    done();
+  });
+});
+
+test('login reports a WAF captcha as waf, not a credentials failure', (done) => {
+  loginWith({
+    status: 405, contentType: 'text/html',
+    body: '<html><body>Human Verification</body></html>',
+  }, (err, token) => {
+    expect(err.kind).toBe('waf');
+    expect(token).toBeNull();
+    done();
+  });
+});
+
+test('login reports a transport failure as network', (done) => {
+  loginWith({ networkError: true }, (err) => {
+    expect(err.kind).toBe('network');
+    done();
+  });
+});
+
+test('login refuses to call a 2xx without a key a credentials failure', (done) => {
+  loginWith({
+    status: 200, contentType: 'application/json', body: '{"detail":"odd"}',
+  }, (err) => {
+    expect(err.kind).toBe('unknown_transient');
+    done();
+  });
+});
+
+test('a login error carries no credential material', (done) => {
+  loginWith({
+    status: 400, contentType: 'application/json', body: '{"non_field_errors":["nope"]}',
+  }, (err) => {
+    expect(JSON.stringify(err)).not.toContain('hunter2');
+    expect(JSON.stringify(err)).not.toContain('a@b.com');
     done();
   });
 });

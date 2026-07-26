@@ -95,8 +95,37 @@ function parseConfigResponse(raw, previous) {
   return d;
 }
 
+// Credentials are pulled out of the raw response SEPARATELY from the settings
+// merge, and deliberately never travel through parseConfigResponse: whatever
+// that function returns is what gets JSON.stringify'd into localStorage, so a
+// password reachable from its result is a password written to disk. The keys
+// are simply unknown to the merge (it reads a fixed list), so they are dropped
+// there and picked up only here, by a caller that uses them once and lets them
+// go out of scope.
+//
+// FireBoard's login endpoint calls the field `username`, but it is an email
+// address; the config page sends it as `email`.
+//
+// Returns null -- never a partial object -- when there is nothing to sign in
+// with, including on an explicit sign-out, which must not be turned into a
+// login attempt with leftover field values.
+function extractCredentials(raw) {
+  var o;
+  try {
+    o = JSON.parse(raw);
+  } catch (e) {
+    return null;
+  }
+  if (!o || typeof o !== 'object') return null;
+  if (o.signOut === true) return null;
+  if (typeof o.email !== 'string' || !o.email) return null;
+  if (typeof o.password !== 'string' || !o.password) return null;
+  return { email: o.email, password: o.password };
+}
+
 module.exports = {
   defaultSettings: defaultSettings,
   buildConfigUrl: buildConfigUrl,
   parseConfigResponse: parseConfigResponse,
+  extractCredentials: extractCredentials,
 };

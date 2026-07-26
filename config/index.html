@@ -33,11 +33,9 @@
     <input type="text" id="email" autocomplete="username">
     <label>Password</label>
     <input type="password" id="password" autocomplete="current-password">
-    <div style="height:12px"></div>
-    <button id="signin">Sign in</button>
     <div class="status" id="auth-status"></div>
-    <div class="hint">Your password is used once to fetch an access token and is
-      never stored on the watch or the phone.</div>
+    <div class="hint">Press Save to sign in. Your email and password are handed
+      to the watch app, used once to fetch an access token, and are not stored.</div>
   </div>
   <div id="signed-in" style="display:none">
     <div class="status ok">Signed in.</div>
@@ -119,7 +117,6 @@ function timeToMinutes(v) {
   return parseInt(parts[0], 10) * 60 + parseInt(parts[1], 10);
 }
 
-var token = '';
 var signedOutThisVisit = false;
 
 // Restore from query string
@@ -147,56 +144,9 @@ document.getElementById('quietEnabled').addEventListener('change', function () {
 });
 
 document.getElementById('signout').addEventListener('click', function () {
-  token = '';
   signedOutThisVisit = true;
   document.getElementById('signed-in').style.display = 'none';
   document.getElementById('signed-out').style.display = 'block';
-});
-
-document.getElementById('signin').addEventListener('click', function () {
-  var status = document.getElementById('auth-status');
-  status.className = 'status';
-  status.textContent = 'Signing in...';
-  var xhr = new XMLHttpRequest();
-  xhr.open('POST', 'https://fireboard.io/api/rest-auth/login/');
-  xhr.setRequestHeader('Content-Type', 'application/json');
-  xhr.onload = function () {
-    var ct = (xhr.getResponseHeader('Content-Type') || '').toLowerCase();
-    if (ct.indexOf('text/html') !== -1) {
-      // WAF captcha or edge block — not a credentials problem.
-      document.getElementById('password').value = '';
-      status.className = 'status err';
-      status.textContent = 'FireBoard is temporarily blocking sign-in. Wait a few minutes and try again.';
-      return;
-    }
-    try {
-      var body = JSON.parse(xhr.responseText);
-      if (body.key) {
-        token = body.key;
-        signedOutThisVisit = false;
-        document.getElementById('password').value = '';
-        document.getElementById('signed-out').style.display = 'none';
-        document.getElementById('signed-in').style.display = 'block';
-      } else {
-        document.getElementById('password').value = '';
-        status.className = 'status err';
-        status.textContent = 'Sign-in failed. Check your email and password.';
-      }
-    } catch (e) {
-      document.getElementById('password').value = '';
-      status.className = 'status err';
-      status.textContent = 'Unexpected response from FireBoard.';
-    }
-  };
-  xhr.onerror = function () {
-    document.getElementById('password').value = '';
-    status.className = 'status err';
-    status.textContent = 'Network error.';
-  };
-  xhr.send(JSON.stringify({
-    username: document.getElementById('email').value,
-    password: document.getElementById('password').value
-  }));
 });
 
 document.getElementById('save').addEventListener('click', function () {
@@ -211,15 +161,28 @@ document.getElementById('save').addEventListener('click', function () {
     quietEnd: quietOn ? timeToMinutes(document.getElementById('quietEnd').value) : null,
     pollSec: parseInt(document.getElementById('pollSec').value, 10)
   };
-  // Token handling: the page cannot know the previously stored token (it is
-  // never round-tripped through the config URL). Represent intent explicitly
-  // rather than sending an empty value that would be mistaken for "clear it".
-  if (signedOutThisVisit) {
+  // Credential handling. This page CANNOT do the token exchange itself: it is
+  // served from github.io and FireBoard's login endpoint sends no CORS headers
+  // at all (a preflight from this origin returns Django's bare
+  // `Allow: POST, OPTIONS`), so the browser discards every response. PebbleKit
+  // JS has no browser origin and is not subject to CORS, so the credentials are
+  // handed to the watch app, which performs the exchange and keeps only the
+  // resulting token.
+  //
+  // The page also cannot know the previously stored token -- it is never
+  // round-tripped through the config URL -- so intent is represented
+  // explicitly rather than by an empty value that would read as "clear it".
+  var email = document.getElementById('email').value;
+  var password = document.getElementById('password').value;
+  if (email && password) {
+    out.email = email;
+    out.password = password;
+  } else if (signedOutThisVisit) {
+    // Sign-out carries no credentials, and credentials are never paired with
+    // signOut: the two are mutually exclusive on the wire.
     out.signOut = true;
-  } else if (token) {
-    out.token = token;
   }
-  // else: no token key at all — "leave the stored token as it was".
+  // else: no credential key at all — "leave the stored token as it was".
   document.location = 'pebblejs://close#' + encodeURIComponent(JSON.stringify(out));
 });
 </script>
