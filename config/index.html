@@ -120,6 +120,7 @@ function timeToMinutes(v) {
 }
 
 var token = '';
+var signedOutThisVisit = false;
 
 // Restore from query string
 (function restore() {
@@ -147,6 +148,7 @@ document.getElementById('quietEnabled').addEventListener('change', function () {
 
 document.getElementById('signout').addEventListener('click', function () {
   token = '';
+  signedOutThisVisit = true;
   document.getElementById('signed-in').style.display = 'none';
   document.getElementById('signed-out').style.display = 'block';
 });
@@ -162,6 +164,7 @@ document.getElementById('signin').addEventListener('click', function () {
     var ct = (xhr.getResponseHeader('Content-Type') || '').toLowerCase();
     if (ct.indexOf('text/html') !== -1) {
       // WAF captcha or edge block — not a credentials problem.
+      document.getElementById('password').value = '';
       status.className = 'status err';
       status.textContent = 'FireBoard is temporarily blocking sign-in. Wait a few minutes and try again.';
       return;
@@ -170,19 +173,23 @@ document.getElementById('signin').addEventListener('click', function () {
       var body = JSON.parse(xhr.responseText);
       if (body.key) {
         token = body.key;
+        signedOutThisVisit = false;
         document.getElementById('password').value = '';
         document.getElementById('signed-out').style.display = 'none';
         document.getElementById('signed-in').style.display = 'block';
       } else {
+        document.getElementById('password').value = '';
         status.className = 'status err';
         status.textContent = 'Sign-in failed. Check your email and password.';
       }
     } catch (e) {
+      document.getElementById('password').value = '';
       status.className = 'status err';
       status.textContent = 'Unexpected response from FireBoard.';
     }
   };
   xhr.onerror = function () {
+    document.getElementById('password').value = '';
     status.className = 'status err';
     status.textContent = 'Network error.';
   };
@@ -195,7 +202,6 @@ document.getElementById('signin').addEventListener('click', function () {
 document.getElementById('save').addEventListener('click', function () {
   var quietOn = document.getElementById('quietEnabled').checked;
   var out = {
-    token: token,
     layout: parseInt(document.getElementById('layout').value, 10),
     pitOverride: document.getElementById('pitOverride').value,
     units: document.getElementById('units').value,
@@ -205,6 +211,15 @@ document.getElementById('save').addEventListener('click', function () {
     quietEnd: quietOn ? timeToMinutes(document.getElementById('quietEnd').value) : null,
     pollSec: parseInt(document.getElementById('pollSec').value, 10)
   };
+  // Token handling: the page cannot know the previously stored token (it is
+  // never round-tripped through the config URL). Represent intent explicitly
+  // rather than sending an empty value that would be mistaken for "clear it".
+  if (signedOutThisVisit) {
+    out.signOut = true;
+  } else if (token) {
+    out.token = token;
+  }
+  // else: no token key at all — "leave the stored token as it was".
   document.location = 'pebblejs://close#' + encodeURIComponent(JSON.stringify(out));
 });
 </script>

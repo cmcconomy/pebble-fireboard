@@ -40,8 +40,31 @@ function clampPoll(v) {
   return n;
 }
 
-function parseConfigResponse(raw) {
-  var d = defaultSettings();
+var VALID_UNITS = { auto: true, F: true, C: true };
+
+function toBool(v, fallback) {
+  if (v === undefined) return fallback;
+  if (v === 'false' || v === '0') return false;
+  return !!v;
+}
+
+function parseConfigResponse(raw, previous) {
+  var d;
+  if (previous && typeof previous === 'object') {
+    d = {
+      token: previous.token,
+      layout: previous.layout,
+      pitOverride: previous.pitOverride,
+      units: previous.units,
+      showAlertVisuals: previous.showAlertVisuals,
+      vibrateEnabled: previous.vibrateEnabled,
+      quietStart: previous.quietStart,
+      quietEnd: previous.quietEnd,
+      pollSec: previous.pollSec,
+    };
+  } else {
+    d = defaultSettings();
+  }
   var o;
   try {
     o = JSON.parse(raw);
@@ -56,16 +79,21 @@ function parseConfigResponse(raw) {
     d.pitOverride = parseInt(o.pitOverride, 10);
     if (isNaN(d.pitOverride)) d.pitOverride = null;
   }
-  if (typeof o.units === 'string') d.units = o.units;
-  if (o.showAlertVisuals !== undefined) d.showAlertVisuals = !!o.showAlertVisuals;
-  if (o.vibrateEnabled !== undefined) d.vibrateEnabled = !!o.vibrateEnabled;
+  if (typeof o.units === 'string' && VALID_UNITS.hasOwnProperty(o.units)) {
+    d.units = o.units;
+  } else if (d.units === undefined) {
+    d.units = 'auto';
+  }
+  d.showAlertVisuals = toBool(o.showAlertVisuals, d.showAlertVisuals);
+  d.vibrateEnabled = toBool(o.vibrateEnabled, d.vibrateEnabled);
   if (o.quietStart !== undefined && o.quietStart !== '' && o.quietStart !== null) {
     d.quietStart = parseInt(o.quietStart, 10);
   }
   if (o.quietEnd !== undefined && o.quietEnd !== '' && o.quietEnd !== null) {
     d.quietEnd = parseInt(o.quietEnd, 10);
   }
-  d.pollSec = clampPoll(o.pollSec !== undefined ? o.pollSec : 30);
+  d.pollSec = clampPoll(o.pollSec !== undefined ? o.pollSec : d.pollSec);
+  if (o.signOut === true) d.token = '';
   return d;
 }
 

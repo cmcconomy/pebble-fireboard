@@ -21,6 +21,7 @@ test('config url never carries a password field', () => {
   const url = buildConfigUrl('https://example.com/config/',
     Object.assign(defaultSettings(), { token: 'secret-token' }));
   expect(url).not.toContain('password');
+  expect(url).not.toContain('secret-token');
 });
 
 test('parses a full response', () => {
@@ -56,4 +57,57 @@ test('treats a malformed response as defaults', () => {
 test('auto pit override round-trips as null', () => {
   const s = parseConfigResponse(JSON.stringify({ pitOverride: '' }));
   expect(s.pitOverride).toBeNull();
+});
+
+test('a settings-only response preserves the previous token', () => {
+  const previous = Object.assign(defaultSettings(), { token: 'existing-token' });
+  const s = parseConfigResponse(JSON.stringify({ layout: 2 }), previous);
+  expect(s.token).toBe('existing-token');
+});
+
+test('signOut:true clears the previous token', () => {
+  const previous = Object.assign(defaultSettings(), { token: 'existing-token' });
+  const s = parseConfigResponse(JSON.stringify({ signOut: true }), previous);
+  expect(s.token).toBe('');
+});
+
+test('a new token in the response replaces the previous one', () => {
+  const previous = Object.assign(defaultSettings(), { token: 'old-token' });
+  const s = parseConfigResponse(JSON.stringify({ token: 'new-token' }), previous);
+  expect(s.token).toBe('new-token');
+});
+
+test('a settings-only save preserves the token and applies the new layout', () => {
+  const previous = Object.assign(defaultSettings(), { token: 'existing-token', layout: 0 });
+  const s = parseConfigResponse(JSON.stringify({ layout: 1 }), previous);
+  expect(s.token).toBe('existing-token');
+  expect(s.layout).toBe(1);
+});
+
+test('parseConfigResponse does not mutate the previous settings object', () => {
+  const previous = Object.assign(defaultSettings(), { token: 'existing-token', layout: 0 });
+  const snapshot = JSON.stringify(previous);
+  parseConfigResponse(JSON.stringify({ layout: 1, signOut: true }), previous);
+  expect(JSON.stringify(previous)).toBe(snapshot);
+});
+
+test('an invalid units value falls back rather than being accepted', () => {
+  const s = parseConfigResponse(JSON.stringify({ units: 'banana' }));
+  expect(s.units).toBe('auto');
+});
+
+test('an invalid units value falls back to the previous value when supplied', () => {
+  const previous = Object.assign(defaultSettings(), { units: 'F' });
+  const s = parseConfigResponse(JSON.stringify({ units: 'banana' }), previous);
+  expect(s.units).toBe('F');
+});
+
+test('showAlertVisuals "false" string resolves to false', () => {
+  const s = parseConfigResponse(JSON.stringify({ showAlertVisuals: 'false' }));
+  expect(s.showAlertVisuals).toBe(false);
+});
+
+test('vibrateEnabled "0" string resolves to false', () => {
+  const s = parseConfigResponse(JSON.stringify({ vibrateEnabled: '0' }));
+  expect(s.vibrateEnabled).toBe(false);
 });
