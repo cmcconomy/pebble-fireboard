@@ -105,10 +105,17 @@ Replace the `pebble` block in `pebble/package.json`. Generate a fresh UUID with 
       "P_LABEL[4]", "P_TEMP[4]", "P_MIN[4]", "P_MAX[4]", "P_RATE[4]", "P_FLAGS[4]",
       "N_PROBES", "ELAPSED_SEC", "STALENESS_SEC", "FB_BATTERY",
       "SESSION_ID", "ALERT_LEVEL", "BANNER", "LAYOUT", "DEGREETYPE", "STATE_FLAGS"
-    ]
+    ],
+    "resources": { "media": [] }
   }
 }
 ```
+
+> ⚠️ **`resources.media` is mandatory even when empty.** An earlier version of this plan omitted
+> it. The build still succeeds and produces a structurally valid `.pbw`, but **the watch refuses to
+> install it**, reporting only `App install failed.` — no reason code, nothing more under `-v`, and
+> `pebble ping` keeps returning `Pong!` so the connection looks healthy. Found by bisecting against
+> a pristine `pebble new-project`, which installed fine.
 
 `"watchface": true` is what makes this a watchface rather than an app. Watchfaces receive no button input.
 
