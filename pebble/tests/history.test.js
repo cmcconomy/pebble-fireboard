@@ -46,6 +46,15 @@ test('evicts oldest samples beyond maxSamples', () => {
   expect(h.sampleCount(3)).toBe(5);
 });
 
+test('rate after eviction still reflects the true ramp slope', () => {
+  // 10 samples on a steady 1 F/min ramp, window capped at 5: eviction should
+  // shorten the window without inflating or corrupting the computed rate.
+  const h = new History({ maxSamples: 5 });
+  for (let i = 0; i < 10; i++) { push(h, 1, i * MIN, { 3: 80 + i }); }
+  expect(h.sampleCount(3)).toBe(5);
+  expect(h.rate(3)).toBeCloseTo(1.0);
+});
+
 test('a probe climbing steadily is not stalled', () => {
   const h = new History({ maxSamples: 120 });
   for (let i = 0; i <= 30; i++) { push(h, 1, i * MIN, { 3: 150 + i * 0.5 }); }
@@ -56,6 +65,23 @@ test('flat in the stall band with a hot pit is a stall', () => {
   const h = new History({ maxSamples: 120 });
   for (let i = 0; i <= 30; i++) { push(h, 1, i * MIN, { 3: 159 + (i % 2) * 0.05 }); }
   expect(h.isStalled(3, 30 * MIN, 240)).toBe(true);
+});
+
+test('a small sustained negative drift in-band with a hot pit is a stall', () => {
+  // Real stalls often drift slightly negative as surface moisture evaporates.
+  // This case fails if Math.abs() were removed from the rate check, because
+  // a signed r >= threshold comparison would never catch a negative rate.
+  const h = new History({ maxSamples: 120 });
+  for (let i = 0; i <= 30; i++) { push(h, 1, i * MIN, { 3: 158 - i * 0.05 }); }
+  expect(h.isStalled(3, 30 * MIN, 240)).toBe(true);
+});
+
+test('a clearly falling probe in-band with a hot pit is not a stall', () => {
+  // A dropping temperature is not a plateau; calling it "normal" would be
+  // actively misleading, even though it sits inside the stall band.
+  const h = new History({ maxSamples: 120 });
+  for (let i = 0; i <= 30; i++) { push(h, 1, i * MIN, { 3: 168 - i * 0.5 }); }
+  expect(h.isStalled(3, 30 * MIN, 240)).toBe(false);
 });
 
 test('flat below the stall band is not a stall', () => {
