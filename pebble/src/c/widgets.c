@@ -3,12 +3,23 @@
 
 int widget_pct_of(int total, int pct) { return (total * pct) / 100; }
 
-static void format_temp(char *buf, size_t cap, int16_t tenths, bool parens) {
+// ASCII only. The flint system font has no degree glyph -- a literal '\xc2\xb0'
+// renders as a tofu box -- so the unit letter from DEGREETYPE carries the job
+// instead: "234F" / "112C". DEGREETYPE is 1 = Celsius, 2 = Fahrenheit; anything
+// else is an unparsed/absent field and falls back to Fahrenheit, matching
+// model_init's default.
+static char degree_suffix(uint8_t degreetype) {
+  return (degreetype == 1) ? 'C' : 'F';
+}
+
+static void format_temp(char *buf, size_t cap, int16_t tenths, bool parens,
+                        uint8_t degreetype) {
   int whole = tenths / 10;
+  char u = degree_suffix(degreetype);
   if (parens) {
-    snprintf(buf, cap, "(%d)", whole);
+    snprintf(buf, cap, "(%d%c)", whole, u);
   } else {
-    snprintf(buf, cap, "%d", whole);
+    snprintf(buf, cap, "%d%c", whole, u);
   }
 }
 
@@ -72,7 +83,7 @@ void widget_draw_rule(GContext *ctx, GRect bounds, int y) {
 }
 
 void widget_draw_probe_row(GContext *ctx, GRect area, const ProbeView *p,
-                           bool show_alerts, bool stale) {
+                           bool show_alerts, bool stale, uint8_t degreetype) {
   bool alarm = show_alerts && (p->flags & FB_FLAG_OUT_OF_BAND);
 
   // Inversion is the alert language on 1-bit. It reads harder than any colour
@@ -102,7 +113,7 @@ void widget_draw_probe_row(GContext *ctx, GRect area, const ProbeView *p,
   // static: safe only because Pebble's draw path is synchronous and
   // single-threaded.
   static char value[16];
-  format_temp(value, sizeof(value), p->temp_tenths, stale);
+  format_temp(value, sizeof(value), p->temp_tenths, stale, degreetype);
 
   // Rate is shown only for probes with no band to draw, and never when stale:
   // a stale reading must not look like it is still moving.
