@@ -8,7 +8,11 @@ var STATE = { COOKING: 1, SHOW_ALERT_VISUALS: 2, STALE: 4 };
 
 function tenths(v) {
   if (v === null || v === undefined) return 0;
-  return Math.round(v * 10);
+  // Clamp to int16 range [-32768, 32767]. Values cross AppMessage as int16;
+  // unclamped overflow wraps to negative on the watch (3276.8° → wrong negative temp),
+  // but clamped saturation (3276.7°) reads as obviously broken. Saturation is safer.
+  var scaled = Math.round(v * 10);
+  return Math.max(-32768, Math.min(32767, scaled));
 }
 
 // The watch renders the list as given: pit first, then ascending channel.

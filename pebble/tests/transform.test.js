@@ -103,7 +103,7 @@ test('worst-case frame fits the 1024-byte inbox', () => {
   }
   const f = buildFrame(Object.assign({}, base, {
     probes: many, pitChannel: 1,
-    banner: 'X'.repeat(63),
+    banner: 'X'.repeat(64),
   }));
   const bytes = estimateFrameBytes(f);
   expect(bytes).toBeLessThan(1024);
@@ -112,4 +112,39 @@ test('worst-case frame fits the 1024-byte inbox', () => {
 test('handles a missing rate as zero', () => {
   const f = buildFrame(Object.assign({}, base, { rates: {} }));
   expect(f.P_RATE0).toBe(0);
+});
+
+test('clamps temperature above int16 ceiling to 32767', () => {
+  const f = buildFrame(Object.assign({}, base, {
+    probes: [{ channel: 4, label: 'fault', temp: 9999.0,
+               min: null, max: null, hasAlert: false }],
+    pitChannel: 4, rates: {}, perProbe: {},
+  }));
+  expect(f.P_TEMP0).toBe(32767);
+});
+
+test('clamps value below int16 floor to -32768', () => {
+  const f = buildFrame(Object.assign({}, base, {
+    probes: [{ channel: 4, label: 'fault', temp: -9999.0,
+               min: null, max: null, hasAlert: false }],
+    pitChannel: 4, rates: {}, perProbe: {},
+  }));
+  expect(f.P_TEMP0).toBe(-32768);
+});
+
+test('normal temperature passes through clamping unchanged', () => {
+  const f = buildFrame(base);
+  expect(f.P_TEMP0).toBe(2789);
+  expect(f.P_TEMP1).toBe(844);
+});
+
+test('null and undefined still yield 0 after clamping', () => {
+  const f = buildFrame(Object.assign({}, base, {
+    probes: [{ channel: 4, label: 'test', temp: null,
+               min: undefined, max: null, hasAlert: false }],
+    pitChannel: 4, rates: {}, perProbe: {},
+  }));
+  expect(f.P_TEMP0).toBe(0);
+  expect(f.P_MIN0).toBe(0);
+  expect(f.P_MAX0).toBe(0);
 });
