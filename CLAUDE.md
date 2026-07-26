@@ -115,7 +115,41 @@ Developer Connection ON (shows the Server IP). Phone and laptop on the same Wi-F
 without AP/client isolation. AirDrop-ing the `.pbw` and opening it on the phone
 also works with zero network requirements.
 
-## Known pitfalls (all bitten in tokenwatch — do not re-hit)
+## Known pitfalls (bitten in this project — do not re-hit)
+
+0. **`package.json` MUST contain `pebble.resources.media`, even when empty.** Omitting the
+   key builds a perfectly valid-looking `.pbw` that the watch **refuses to install**, with
+   the sole diagnostic being `App install failed.` — no reason code, nothing extra under
+   `-v`, and `pebble ping` still returns `Pong!` so the connection looks healthy.
+   ```json
+   "resources": { "media": [] }
+   ```
+   `pebble new-project` always emits this key; hand-written or edited `package.json` files
+   drop it easily. **Bisect method that found it:** a pristine `pebble new-project` installed
+   fine while ours did not, so the fault had to be in `package.json`; diffing the two showed
+   the missing `resources` block. Keep that technique — the CLI gives you nothing.
+
+1. **A watchface's PebbleKit JS only runs while that watchface is displayed.** `pebble install`
+   does not launch a watchface, so `pebble logs` stays silent and looks broken. To exercise
+   pkjs during development, temporarily set `"watchface": false` and use
+   `pebble install --phone <IP> --logs`, which installs, launches, and tails in one step.
+   Restore the flag afterwards.
+
+2. **macOS has no `timeout`.** `pebble logs` streams forever and will hang a tool call. Bound
+   it with `perl -e 'alarm 90; exec @ARGV' pebble logs --phone <IP>`.
+
+## Verified on-device (SDK 4.9.169, Pebble 2 Duo)
+
+- **PebbleKit JS CAN set `User-Agent`.** `xhr.setRequestHeader('User-Agent', ...)` does **not**
+  throw, despite it being a forbidden header in the XHR spec. Confirmed by an on-device spike:
+  the request reached Django and returned `{"detail":"Invalid token"}` (JSON) rather than
+  nginx's HTML 403. **The phone-direct architecture is viable** — no daemon tier required.
+- **`messageKeys` array syntax works as documented in the SDK source.** `"P_LABEL[4]"` allocated
+  base 10000, `"P_TEMP[4]"` base 10004 — four apart, confirmed in the built `appinfo.json`.
+- **A minimal app binary is ~820 bytes** per platform. That is normal, not a truncated build; a
+  pristine template is 828. tokenwatch's 7220 reflects ~750 lines of real C.
+
+## Pitfalls inherited from tokenwatch (do not re-hit)
 
 1. **Developer Connection self-disables** after idle/overnight. Symptom: install
    worked an hour ago, now `libpebble2.exceptions.TimeoutError` — even though

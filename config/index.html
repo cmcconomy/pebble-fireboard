@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FireBoard Watchface</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; margin: 0;
+         padding: 16px; background: #f4f4f6; color: #111; }
+  h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .06em;
+       color: #666; margin: 22px 0 8px; }
+  .card { background: #fff; border-radius: 10px; padding: 14px; margin-bottom: 10px; }
+  label { display: block; margin: 10px 0 4px; font-size: 14px; }
+  input[type=text], input[type=password], input[type=time], select {
+    width: 100%; padding: 10px; font-size: 16px; border: 1px solid #ccd;
+    border-radius: 7px; box-sizing: border-box; background: #fff; }
+  .row { display: flex; align-items: center; gap: 10px; margin: 12px 0; }
+  .row input { width: auto; }
+  button { width: 100%; padding: 14px; font-size: 16px; font-weight: 600;
+           border: 0; border-radius: 9px; background: #d9480f; color: #fff; }
+  button.secondary { background: #495057; }
+  .status { font-size: 14px; margin-top: 9px; min-height: 19px; }
+  .ok { color: #2b8a3e; } .err { color: #c92a2a; }
+  .hint { font-size: 12px; color: #777; margin-top: 5px; line-height: 1.45; }
+</style>
+</head>
+<body>
+
+<h2>Account</h2>
+<div class="card">
+  <div id="signed-out">
+    <label>FireBoard email</label>
+    <input type="text" id="email" autocomplete="username">
+    <label>Password</label>
+    <input type="password" id="password" autocomplete="current-password">
+    <div style="height:12px"></div>
+    <button id="signin">Sign in</button>
+    <div class="status" id="auth-status"></div>
+    <div class="hint">Your password is used once to fetch an access token and is
+      never stored on the watch or the phone.</div>
+  </div>
+  <div id="signed-in" style="display:none">
+    <div class="status ok">Signed in.</div>
+    <div style="height:10px"></div>
+    <button class="secondary" id="signout">Sign out</button>
+  </div>
+</div>
+
+<h2>Display</h2>
+<div class="card">
+  <label>Layout</label>
+  <select id="layout">
+    <option value="0">Ledger</option>
+    <option value="1">Hero pit</option>
+    <option value="2">Progress bars</option>
+  </select>
+  <div class="hint">Hero and Progress arrive in a later release; both currently
+    render as Ledger.</div>
+
+  <label>Pit probe</label>
+  <select id="pitOverride"><option value="">Auto-detect</option></select>
+  <div class="hint">Auto matches labels containing pit, grill, smoker or chamber.</div>
+
+  <label>Units</label>
+  <select id="units">
+    <option value="auto">Follow FireBoard</option>
+    <option value="F">Always &deg;F</option>
+    <option value="C">Always &deg;C</option>
+  </select>
+</div>
+
+<h2>Alerts</h2>
+<div class="card">
+  <div class="row"><input type="checkbox" id="showAlertVisuals" checked>
+    <span>Show alert state on the watchface</span></div>
+  <div class="row"><input type="checkbox" id="vibrateEnabled" checked>
+    <span>Vibrate when alerts fire</span></div>
+  <div class="row"><input type="checkbox" id="quietEnabled">
+    <span>Quiet hours</span></div>
+  <div id="quiet-times" style="display:none">
+    <label>From</label><input type="time" id="quietStart" value="22:00">
+    <label>To</label><input type="time" id="quietEnd" value="06:00">
+  </div>
+  <div class="hint">Thresholds come from the alerts you already set in the
+    FireBoard app. Probes with no alert are flagged on the watchface.</div>
+</div>
+
+<h2>Advanced</h2>
+<div class="card">
+  <label>Poll interval</label>
+  <select id="pollSec">
+    <option value="20">20 seconds</option>
+    <option value="30" selected>30 seconds</option>
+    <option value="60">60 seconds</option>
+    <option value="120">2 minutes</option>
+  </select>
+  <div class="hint">FireBoard allows about 17 requests every 5 minutes
+    <em>per account</em>, shared with the FireBoard phone app. 20 seconds leaves
+    little headroom; 30 is recommended.</div>
+</div>
+
+<div style="height:8px"></div>
+<button id="save">Save</button>
+<div style="height:24px"></div>
+
+<script>
+function qs(name) {
+  var m = new RegExp('[?&]' + name + '=([^&]*)').exec(window.location.search);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+function minutesToTime(m) {
+  if (m === null || m === '') return null;
+  var h = Math.floor(m / 60), mm = m % 60;
+  return (h < 10 ? '0' : '') + h + ':' + (mm < 10 ? '0' : '') + mm;
+}
+function timeToMinutes(v) {
+  if (!v) return null;
+  var parts = v.split(':');
+  return parseInt(parts[0], 10) * 60 + parseInt(parts[1], 10);
+}
+
+var token = '';
+var signedOutThisVisit = false;
+
+// Restore from query string
+(function restore() {
+  if (qs('layout')) document.getElementById('layout').value = qs('layout');
+  if (qs('units')) document.getElementById('units').value = qs('units');
+  if (qs('pollSec')) document.getElementById('pollSec').value = qs('pollSec');
+  document.getElementById('showAlertVisuals').checked = qs('showAlertVisuals') !== '0';
+  document.getElementById('vibrateEnabled').checked = qs('vibrateEnabled') !== '0';
+  var qStart = qs('quietStart'), qEnd = qs('quietEnd');
+  if (qStart) {
+    document.getElementById('quietEnabled').checked = true;
+    document.getElementById('quiet-times').style.display = 'block';
+    document.getElementById('quietStart').value = minutesToTime(parseInt(qStart, 10));
+    if (qEnd) document.getElementById('quietEnd').value = minutesToTime(parseInt(qEnd, 10));
+  }
+  if (qs('hasToken') === '1') {
+    document.getElementById('signed-out').style.display = 'none';
+    document.getElementById('signed-in').style.display = 'block';
+  }
+})();
+
+document.getElementById('quietEnabled').addEventListener('change', function () {
+  document.getElementById('quiet-times').style.display = this.checked ? 'block' : 'none';
+});
+
+document.getElementById('signout').addEventListener('click', function () {
+  token = '';
+  signedOutThisVisit = true;
+  document.getElementById('signed-in').style.display = 'none';
+  document.getElementById('signed-out').style.display = 'block';
+});
+
+document.getElementById('signin').addEventListener('click', function () {
+  var status = document.getElementById('auth-status');
+  status.className = 'status';
+  status.textContent = 'Signing in...';
+  var xhr = new XMLHttpRequest();
+  xhr.open('POST', 'https://fireboard.io/api/rest-auth/login/');
+  xhr.setRequestHeader('Content-Type', 'application/json');
+  xhr.onload = function () {
+    var ct = (xhr.getResponseHeader('Content-Type') || '').toLowerCase();
+    if (ct.indexOf('text/html') !== -1) {
+      // WAF captcha or edge block — not a credentials problem.
+      document.getElementById('password').value = '';
+      status.className = 'status err';
+      status.textContent = 'FireBoard is temporarily blocking sign-in. Wait a few minutes and try again.';
+      return;
+    }
+    try {
+      var body = JSON.parse(xhr.responseText);
+      if (body.key) {
+        token = body.key;
+        signedOutThisVisit = false;
+        document.getElementById('password').value = '';
+        document.getElementById('signed-out').style.display = 'none';
+        document.getElementById('signed-in').style.display = 'block';
+      } else {
+        document.getElementById('password').value = '';
+        status.className = 'status err';
+        status.textContent = 'Sign-in failed. Check your email and password.';
+      }
+    } catch (e) {
+      document.getElementById('password').value = '';
+      status.className = 'status err';
+      status.textContent = 'Unexpected response from FireBoard.';
+    }
+  };
+  xhr.onerror = function () {
+    document.getElementById('password').value = '';
+    status.className = 'status err';
+    status.textContent = 'Network error.';
+  };
+  xhr.send(JSON.stringify({
+    username: document.getElementById('email').value,
+    password: document.getElementById('password').value
+  }));
+});
+
+document.getElementById('save').addEventListener('click', function () {
+  var quietOn = document.getElementById('quietEnabled').checked;
+  var out = {
+    layout: parseInt(document.getElementById('layout').value, 10),
+    pitOverride: document.getElementById('pitOverride').value,
+    units: document.getElementById('units').value,
+    showAlertVisuals: document.getElementById('showAlertVisuals').checked,
+    vibrateEnabled: document.getElementById('vibrateEnabled').checked,
+    quietStart: quietOn ? timeToMinutes(document.getElementById('quietStart').value) : null,
+    quietEnd: quietOn ? timeToMinutes(document.getElementById('quietEnd').value) : null,
+    pollSec: parseInt(document.getElementById('pollSec').value, 10)
+  };
+  // Token handling: the page cannot know the previously stored token (it is
+  // never round-tripped through the config URL). Represent intent explicitly
+  // rather than sending an empty value that would be mistaken for "clear it".
+  if (signedOutThisVisit) {
+    out.signOut = true;
+  } else if (token) {
+    out.token = token;
+  }
+  // else: no token key at all — "leave the stored token as it was".
+  document.location = 'pebblejs://close#' + encodeURIComponent(JSON.stringify(out));
+});
+</script>
+</body>
+</html>

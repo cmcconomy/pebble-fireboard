@@ -105,10 +105,17 @@ Replace the `pebble` block in `pebble/package.json`. Generate a fresh UUID with 
       "P_LABEL[4]", "P_TEMP[4]", "P_MIN[4]", "P_MAX[4]", "P_RATE[4]", "P_FLAGS[4]",
       "N_PROBES", "ELAPSED_SEC", "STALENESS_SEC", "FB_BATTERY",
       "SESSION_ID", "ALERT_LEVEL", "BANNER", "LAYOUT", "DEGREETYPE", "STATE_FLAGS"
-    ]
+    ],
+    "resources": { "media": [] }
   }
 }
 ```
+
+> ⚠️ **`resources.media` is mandatory even when empty.** An earlier version of this plan omitted
+> it. The build still succeeds and produces a structurally valid `.pbw`, but **the watch refuses to
+> install it**, reporting only `App install failed.` — no reason code, nothing more under `-v`, and
+> `pebble ping` keeps returning `Pong!` so the connection looks healthy. Found by bisecting against
+> a pristine `pebble new-project`, which installed fine.
 
 `"watchface": true` is what makes this a watchface rather than an app. Watchfaces receive no button input.
 
@@ -1629,7 +1636,12 @@ git commit -m "feat(pkjs): build AppMessage frame with size guarantee"
 - Test: `pebble/tests/config.test.js`
 
 **Interfaces:**
-- Produces: `defaultSettings() -> object`; `buildConfigUrl(baseUrl, settings) -> string`; `parseConfigResponse(json) -> settings`.
+- Produces: `defaultSettings() -> object`; `buildConfigUrl(baseUrl, settings) -> string`;
+  `parseConfigResponse(json, previous?) -> settings`. When `previous` is supplied the result
+  is merged onto it, so a key absent from the response keeps its prior value. This is what
+  stops a settings-only save from wiping the token: the page cannot know the token (it never
+  travels in the URL), so it omits the key rather than sending an empty string. An explicit
+  sign-out is `signOut: true`.
 
 Settings shape: `{token, layout, pitOverride, units, showAlertVisuals, vibrateEnabled, quietStart, quietEnd, pollSec}`. `pitOverride` is `null` for auto. `quietStart`/`quietEnd` are minutes past midnight or `null`.
 
@@ -2242,8 +2254,14 @@ Pebble.addEventListener('showConfiguration', function () {
 
 Pebble.addEventListener('webviewclosed', function (e) {
   if (!e || !e.response) return;
-  var updated = configMod.parseConfigResponse(decodeURIComponent(e.response));
-  // An empty token from the page means "sign out", not "unchanged".
+  // Pass the CURRENT settings as the merge base. The config page deliberately
+  // never receives the token (it must not travel in a URL), so it omits the
+  // token key entirely when the user did not re-authenticate. Parsing against
+  // defaults instead of current settings would read that absence as an empty
+  // token and silently sign the user out on every settings save.
+  // An explicit sign-out arrives as `signOut: true`, not as an empty token.
+  var updated = configMod.parseConfigResponse(decodeURIComponent(e.response),
+                                              state.settings);
   state.settings = updated;
   saveSettings(updated);
   state.history.reset();
@@ -2311,6 +2329,11 @@ git commit -m "feat(pkjs): wire poll loop, backoff, config and alert plumbing"
 #define FB_STATE_COOKING      (1 << 0)
 #define FB_STATE_SHOW_ALERTS  (1 << 1)
 #define FB_STATE_STALE        (1 << 2)
+// The phone owns vibration POLICY (quiet hours, user toggle); the watch owns the
+// buzz. Vibrate on a rising ALERT_LEVEL only when this bit is set. Never send a
+// second AppMessage to suppress a buzz -- it arrives after the watch has already
+// buzzed, and back-to-back sends risk APP_MSG_BUSY.
+#define FB_STATE_MAY_VIBRATE  (1 << 3)
 
 // ALERT_LEVEL values
 #define FB_LEVEL_OK        0
@@ -2366,6 +2389,9 @@ static inline bool model_is_stale(const CookModel *m) {
 }
 static inline bool model_show_alerts(const CookModel *m) {
   return (m->state_flags & FB_STATE_SHOW_ALERTS) != 0;
+}
+static inline bool model_may_vibrate(const CookModel *m) {
+  return (m->state_flags & FB_STATE_MAY_VIBRATE) != 0;
 }
 ```
 
@@ -2897,8 +2923,11 @@ static void inbox_received(DictionaryIterator *iter, void *ctx) {
   model_apply_dict(&s_model, iter);
   ui_set_model(&s_model);
 
-  // Vibrate only on a rising edge. Sitting at 278 must not buzz every poll.
-  if (s_model.alert_level > s_last_level) {
+  // Vibrate only on a rising edge, and only when the phone says we may.
+  // MAY_VIBRATE carries the quiet-hours / user-toggle decision, which is made
+  // phone-side. Note s_last_level is still updated below regardless, so a
+  // suppressed alert does not re-buzz on the next poll once quiet hours end.
+  if (s_model.alert_level > s_last_level && model_may_vibrate(&s_model)) {
     vibe_for_level(s_model.alert_level);
   }
   s_last_level = s_model.alert_level;
