@@ -19,7 +19,8 @@ void layout_ledger_draw(GContext *ctx, GRect b, const CookModel *m) {
   if (!cooking) {
     // Idle: a plain, full-size clock. Nothing about FireBoard on screen.
     int y = b.origin.y + widget_pct_of(b.size.h, 28);
-    widget_draw_clock(ctx, GRect(b.origin.x, y, b.size.w, b.size.h), true);
+    widget_draw_clock(ctx, GRect(b.origin.x, y, b.size.w,
+                                 b.size.h - (y - b.origin.y)), true);
     return;
   }
 
@@ -40,7 +41,8 @@ void layout_ledger_draw(GContext *ctx, GRect b, const CookModel *m) {
   for (uint8_t i = 0; i < m->n_probes; i++) {
     const ProbeView *p = &m->probes[i];
     bool has_band = show_alerts && (p->flags & FB_FLAG_HAS_ALERT);
-    int needed = row_h + (has_band ? band_h + 2 : 0);
+    bool has_flag = !has_band && show_alerts && (p->flags & FB_FLAG_IS_PIT);
+    int needed = row_h + (has_band ? band_h + 2 : (has_flag ? 14 : 0));
     if (y + needed > body_limit) break;      // never overflow into the footer
 
     widget_draw_probe_row(ctx, GRect(b.origin.x, y, b.size.w, row_h), p,
@@ -50,7 +52,7 @@ void layout_ledger_draw(GContext *ctx, GRect b, const CookModel *m) {
     if (has_band) {
       widget_draw_band(ctx, GRect(b.origin.x + 4, y, b.size.w - 8, band_h), p, stale);
       y += band_h + 2;
-    } else if (show_alerts && (p->flags & FB_FLAG_IS_PIT)) {
+    } else if (has_flag) {
       // A live pit with no alert is worth saying out loud — it is the default
       // failure mode of this hardware and invisible in the phone app.
       graphics_context_set_text_color(ctx, GColorWhite);
