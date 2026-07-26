@@ -19,6 +19,7 @@ test('a probe above its max is WARN', () => {
 test('a probe below its min is WARN', () => {
   const r = evaluateProbe(pit(190, 210, 240), true, false);
   expect(r.level).toBe(LEVEL.WARN);
+  expect(r.flags.outOfBand).toBe(true);
 });
 
 test('a food probe reaching its max is CRITICAL, not WARN', () => {
@@ -26,6 +27,23 @@ test('a food probe reaching its max is CRITICAL, not WARN', () => {
   const food = { channel: 3, label: 'butt', temp: 204, min: null, max: 203,
                  hasAlert: true };
   expect(evaluateProbe(food, false, false).level).toBe(LEVEL.CRITICAL);
+});
+
+test('a min-only probe below its min is WARN', () => {
+  const floorProbe = { channel: 4, label: 'pit', temp: 190, min: 210, max: null,
+                       hasAlert: true };
+  const r = evaluateProbe(floorProbe, true, false);
+  expect(r.level).toBe(LEVEL.WARN);
+  expect(r.flags.outOfBand).toBe(true);
+});
+
+test('a min-only probe at or above its min is OK, not CRITICAL', () => {
+  // Min alone is a floor, not a target: rising is normal, not done.
+  const floorProbe = { channel: 4, label: 'pit', temp: 215, min: 210, max: null,
+                       hasAlert: true };
+  const r = evaluateProbe(floorProbe, true, false);
+  expect(r.level).toBe(LEVEL.OK);
+  expect(r.flags.outOfBand).toBe(false);
 });
 
 test('a probe with no alert is never WARN', () => {
@@ -113,4 +131,11 @@ test('respects quiet hours spanning midnight', () => {
     opts({ quietHours: quiet, nowLocalMinutes: 3 * 60 }))).toBe(false);
   expect(shouldVibrate(LEVEL.WARN, LEVEL.OK,
     opts({ quietHours: quiet, nowLocalMinutes: 12 * 60 }))).toBe(true);
+});
+
+test('when quiet hours start equals end, vibration is not suppressed', () => {
+  // start === end means "never quiet" — alerts always vibrate.
+  const neverQuiet = { startMinutes: 12 * 60, endMinutes: 12 * 60 };
+  expect(shouldVibrate(LEVEL.WARN, LEVEL.OK,
+    opts({ quietHours: neverQuiet, nowLocalMinutes: 12 * 60 }))).toBe(true);
 });
