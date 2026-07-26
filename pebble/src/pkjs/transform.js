@@ -1,4 +1,31 @@
 // ES5 only.
+
+// Array messageKeys ("P_LABEL[4]") allocate ONE base symbol, not four named
+// keys: the generated map has "P_LABEL": 10000 and nothing called "P_LABEL0".
+// Indexed elements must therefore be addressed by NUMBER (base + i), which
+// JS turns into the numeric-string property Pebble.sendAppMessage expects.
+// Emitting 'P_LABEL' + i produces an unknown key name and the SDK silently
+// drops the tuple in flight -- the watch then renders empty rows at 0 degrees.
+var mk;
+try {
+  mk = require('message_keys');
+} catch (e) {
+  // FALLBACK -- exists ONLY so this module stays a pure, unit-testable module
+  // under Jest, where 'message_keys' is a build-time virtual module that does
+  // not resolve. The generated build/js/message_keys.json is AUTHORITATIVE;
+  // these numbers are a mirror of it and must never be treated as the source
+  // of truth. If the messageKeys block in package.json is reordered, the
+  // build map changes and this mirror must be updated to match.
+  mk = {
+    P_LABEL: 10000,
+    P_TEMP: 10004,
+    P_MIN: 10008,
+    P_MAX: 10012,
+    P_RATE: 10016,
+    P_FLAGS: 10020,
+  };
+}
+
 var MAX_PROBES = 4;
 var MAX_LABEL = 16;
 var MAX_BANNER = 64;
@@ -42,12 +69,13 @@ function buildFrame(input) {
     if (pp.flags && pp.flags.outOfBand) flags |= FLAG.OUT_OF_BAND;
     if (pp.flags && pp.flags.stalled) flags |= FLAG.STALLED;
 
-    frame['P_LABEL' + i] = String(p.label).substring(0, MAX_LABEL);
-    frame['P_TEMP' + i] = tenths(p.temp);
-    frame['P_MIN' + i] = tenths(p.min);
-    frame['P_MAX' + i] = tenths(p.max);
-    frame['P_RATE' + i] = tenths(rates[p.channel]);
-    frame['P_FLAGS' + i] = flags;
+    // Numeric keys, not names -- see the message_keys note at the top.
+    frame[mk.P_LABEL + i] = String(p.label).substring(0, MAX_LABEL);
+    frame[mk.P_TEMP + i] = tenths(p.temp);
+    frame[mk.P_MIN + i] = tenths(p.min);
+    frame[mk.P_MAX + i] = tenths(p.max);
+    frame[mk.P_RATE + i] = tenths(rates[p.channel]);
+    frame[mk.P_FLAGS + i] = flags;
   }
 
   var stateFlags = 0;
@@ -71,6 +99,9 @@ function buildFrame(input) {
 
 // Mirrors the SDK formula: 1 + (n * 7) + sum of value sizes.
 // Strings are null-terminated and the terminator counts.
+// Key NAMES cost nothing on the wire (every key resolves to a 4-byte uint32
+// in the dict header, already counted in the fixed 7 bytes per tuple), so
+// switching probe keys from names to numbers does not change this estimate.
 function estimateFrameBytes(frame) {
   var total = 1;
   for (var k in frame) {
@@ -85,6 +116,7 @@ function estimateFrameBytes(frame) {
 module.exports = {
   FLAG: FLAG,
   STATE: STATE,
+  KEYS: mk,
   buildFrame: buildFrame,
   estimateFrameBytes: estimateFrameBytes,
 };
