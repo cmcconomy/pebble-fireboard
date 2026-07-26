@@ -81,8 +81,6 @@ function parseConfigResponse(raw, previous) {
   }
   if (typeof o.units === 'string' && VALID_UNITS.hasOwnProperty(o.units)) {
     d.units = o.units;
-  } else if (d.units === undefined) {
-    d.units = 'auto';
   }
   d.showAlertVisuals = toBool(o.showAlertVisuals, d.showAlertVisuals);
   d.vibrateEnabled = toBool(o.vibrateEnabled, d.vibrateEnabled);

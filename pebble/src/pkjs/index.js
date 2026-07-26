@@ -12,6 +12,10 @@ var SETTINGS_KEY = 'fb.settings';
 var USER_AGENT = 'pebble-fireboard/0.1';
 var STALE_AFTER_SEC = 120;
 var MAX_BACKOFF_MS = 600000;
+// The FireBoard budget is 17 calls per 5 minutes and it is SHARED with the
+// user's own phone app. A settings save must not be able to spend a call
+// instantly on every keystroke-close of the config page.
+var MIN_REPOLL_MS = 10000;
 
 var state = {
   settings: null,
@@ -21,6 +25,14 @@ var state = {
   timer: null,
   prevLevel: 0,
   failures: 0,
+  // Last values actually observed from the API. Error frames carry these
+  // forward instead of inventing defaults: a hardcoded sessionId 0 makes the
+  // watch read every error as a NEW cook, and a hardcoded degreetype 2 flips a
+  // Celsius user's unit to Fahrenheit on every dropped poll.
+  lastSessionId: 0,
+  lastDegreetype: 2,
+  // Wall-clock time of the last poll that actually spent a budget call.
+  lastPollMs: 0,
   // Sticky: a dead token stays dead until the token value actually changes,
   // not merely because settings were re-saved (webviewclosed handles that).
   tokenDead: false,
@@ -51,6 +63,23 @@ function toF(v, degreetype) {
   return v;
 }
 
+// Absolute temperature conversion between degreetypes (1 = C, 2 = F).
+function convertTemp(v, from, to) {
+  if (v === null || v === undefined) return v;
+  if (from === to) return v;
+  if (to === 1) return (v - 32) * 5 / 9;      // F -> C
+  return (v * 9 / 5) + 32;                    // C -> F
+}
+
+// The unit the WATCH should display in. 'auto' follows the FireBoard account
+// (DEGREETYPE from the API); 'F'/'C' override it.
+function displayDegreetype(apiDegreetype) {
+  var u = state.settings ? state.settings.units : 'auto';
+  if (u === 'F') return 2;
+  if (u === 'C') return 1;
+  return apiDegreetype;
+}
+
 function send(frame) {
   Pebble.sendAppMessage(frame, function () {}, function (e) {
     console.log('send failed: ' + JSON.stringify(e));
@@ -61,7 +90,9 @@ function sendStatus(bannerText, cooking) {
   send(transform.buildFrame({
     probes: [], pitChannel: null, rates: {}, perProbe: {},
     alertLevel: 0, banner: bannerText, elapsedSec: 0, stalenessSec: 0,
-    batteryPct: 0, sessionId: 0, degreetype: 2,
+    // Carry the last known session/unit forward -- see state.lastSessionId.
+    batteryPct: 0, sessionId: state.lastSessionId,
+    degreetype: displayDegreetype(state.lastDegreetype),
     layout: state.settings ? state.settings.layout : 0,
     cooking: !!cooking, showAlertVisuals: true, stale: true,
   }));
@@ -101,6 +132,7 @@ function poll() {
   if (!state.budget.allow()) { sendStatus('PAUSED', false); scheduleNext(normalDelayMs()); return; }
 
   state.budget.record();
+  state.lastPollMs = now();
   var gen = state.generation;
   state.client.getDevices(function (err, devices) {
     // A reconfiguration happened while this request was in flight. Its
@@ -127,13 +159,27 @@ function poll() {
 
     var norm = model.normalise(devices, { pitOverride: state.settings.pitOverride });
     var t = now();
+    var sessionId = norm.sessionId || 0;
+    var dt = displayDegreetype(norm.degreetype);
+
+    // A new session id is a NEW COOK. history.push resets its own series on the
+    // change, but prevLevel lives here and must be reset alongside it: a cook
+    // that ended at CRITICAL would otherwise leave prevLevel at 3 and the next
+    // cook's genuine CRITICAL would fail the rising-edge test and never buzz.
+    if (sessionId !== state.lastSessionId) state.prevLevel = 0;
+    state.lastSessionId = sessionId;
+    state.lastDegreetype = norm.degreetype;
 
     if (norm.probes.length === 0) {
+      // No probes means the cook is over (or has not started). Drop the alert
+      // level with it: leaving prevLevel at its final value silently disarms
+      // the rising-edge vibration test for the whole of the next cook.
+      state.prevLevel = 0;
       send(transform.buildFrame({
         probes: [], pitChannel: null, rates: {}, perProbe: {},
         alertLevel: 0, banner: '', elapsedSec: 0, stalenessSec: 0,
-        batteryPct: norm.batteryPct, sessionId: norm.sessionId || 0,
-        degreetype: norm.degreetype, layout: state.settings.layout,
+        batteryPct: norm.batteryPct, sessionId: sessionId,
+        degreetype: dt, layout: state.settings.layout,
         cooking: false, showAlertVisuals: state.settings.showAlertVisuals,
         stale: false, mayVibrate: false,
       }));
@@ -141,19 +187,52 @@ function poll() {
       return;
     }
 
+    var stalenessSec = norm.lastTemplogMs
+      ? Math.floor((t - norm.lastTemplogMs) / 1000) : 0;
+    var elapsedSec = norm.startedMs ? Math.floor((t - norm.startedMs) / 1000) : 0;
+    var isStale = stalenessSec > STALE_AFTER_SEC;
+
+    // Unit override. 'auto' follows the account; 'F'/'C' convert everything the
+    // watch will display -- temp and the alert bounds it is compared against --
+    // into the chosen unit, and DEGREETYPE is set to match so the watch labels
+    // it correctly. Bounds must be converted with the SAME transform as temp or
+    // the out-of-band comparison in alerts.evaluate becomes nonsense.
+    var displayProbes = [];
+    var j;
+    for (j = 0; j < norm.probes.length; j++) {
+      var np = norm.probes[j];
+      displayProbes.push({
+        channel: np.channel,
+        label: np.label,
+        hasAlert: np.hasAlert,
+        temp: convertTemp(np.temp, norm.degreetype, dt),
+        min: convertTemp(np.min, norm.degreetype, dt),
+        max: convertTemp(np.max, norm.degreetype, dt),
+      });
+    }
+
     // history.js documents that callers must pass Fahrenheit; convert every
     // probe temperature before pushing so the stall band (150-170F) and the
     // 0.1F/min rate gate are evaluated in the units they were tuned for, even
     // on a Celsius account. Only temp feeds history's arithmetic.
-    var historyProbes = [];
-    var j;
-    for (j = 0; j < norm.probes.length; j++) {
-      historyProbes.push({
-        channel: norm.probes[j].channel,
-        temp: toF(norm.probes[j].temp, norm.degreetype),
-      });
+    //
+    // STALE DATA MUST NOT ENTER THE HISTORY. When a FireBoard loses power the
+    // API keeps serving the last reading unchanged. Pushing that frozen value
+    // every 30s manufactures a ~0 rate over a 20-minute window with the pit
+    // still recorded above 180F -- exactly the isStalled() signature -- and the
+    // watch would report a comfortable STALLED while the fire is actually out.
+    // Skipping the push leaves the series frozen at the last live sample and
+    // forcing stalled=false refuses to make any stall claim from dead data.
+    if (!isStale) {
+      var historyProbes = [];
+      for (j = 0; j < norm.probes.length; j++) {
+        historyProbes.push({
+          channel: norm.probes[j].channel,
+          temp: toF(norm.probes[j].temp, norm.degreetype),
+        });
+      }
+      state.history.push(sessionId, historyProbes, t);
     }
-    state.history.push(norm.sessionId, historyProbes, t);
 
     var pitTempF = null;
     var i;
@@ -168,25 +247,22 @@ function poll() {
     for (i = 0; i < norm.probes.length; i++) {
       var ch = norm.probes[i].channel;
       var rateF = state.history.rate(ch);
-      // history now always stores Fahrenheit, so rate() returns F/min.
-      // P_RATE is displayed in the account's own unit (DEGREETYPE), so
-      // convert back for a Celsius account. A rate is a delta: scale by
-      // 5/9 only -- never apply the +32 offset here.
-      rates[ch] = (rateF === null || norm.degreetype !== 1) ? rateF : (rateF * 5 / 9);
+      // history always stores Fahrenheit, so rate() returns F/min. P_RATE is
+      // displayed in the unit the watch is showing (dt), so convert back for a
+      // Celsius display. A rate is a DELTA: scale by 5/9 only -- never apply
+      // the +32 offset here.
+      rates[ch] = (rateF === null || dt !== 1) ? rateF : (rateF * 5 / 9);
       if (ch !== norm.pitChannel) {
-        stalledChannels[ch] = state.history.isStalled(ch, t, pitTempF);
+        stalledChannels[ch] = isStale
+          ? false : state.history.isStalled(ch, t, pitTempF);
       }
     }
 
     var evaluated = alertsMod.evaluate({
-      probes: norm.probes,
+      probes: displayProbes,
       pitChannel: norm.pitChannel,
       stalledChannels: stalledChannels,
     });
-
-    var stalenessSec = norm.lastTemplogMs
-      ? Math.floor((t - norm.lastTemplogMs) / 1000) : 0;
-    var elapsedSec = norm.startedMs ? Math.floor((t - norm.startedMs) / 1000) : 0;
 
     var d = new Date();
     var vibrate = alertsMod.shouldVibrate(evaluated.level, state.prevLevel, {
@@ -202,7 +278,7 @@ function poll() {
     // the watch owns the buzz itself, triggering on a rising ALERT_LEVEL only
     // when MAY_VIBRATE is set. One AppMessage per poll -- no second send.
     send(transform.buildFrame({
-      probes: norm.probes,
+      probes: displayProbes,
       pitChannel: norm.pitChannel,
       rates: rates,
       perProbe: evaluated.perProbe,
@@ -211,12 +287,12 @@ function poll() {
       elapsedSec: elapsedSec,
       stalenessSec: stalenessSec,
       batteryPct: norm.batteryPct,
-      sessionId: norm.sessionId || 0,
-      degreetype: norm.degreetype,
+      sessionId: sessionId,
+      degreetype: dt,
       layout: state.settings.layout,
       cooking: true,
       showAlertVisuals: state.settings.showAlertVisuals,
-      stale: stalenessSec > STALE_AFTER_SEC,
+      stale: isStale,
       mayVibrate: vibrate,
     }));
 
@@ -232,9 +308,20 @@ function stopTimer() {
 function restartTimer() {
   stopTimer();
   // A dead token refuses to restart the loop at all -- see poll()'s
-  // bad_token handling and webviewclosed's token-change check below.
+  // bad_token handling and webviewclosed's token check below.
   if (state.tokenDead) return;
-  scheduleNext(backoffMs());
+  var delay = backoffMs();
+  // Debounce the immediate re-poll. backoffMs() is 0 after a successful poll,
+  // so every settings save used to spend a budget call the instant the config
+  // page closed -- and a user tweaking three settings in a row burned three of
+  // the 17-per-5-minutes that are shared with their own phone app. Nothing in
+  // a settings change makes fresher data available, so waiting is free.
+  var since = now() - state.lastPollMs;
+  if (state.lastPollMs && since < MIN_REPOLL_MS) {
+    var wait = MIN_REPOLL_MS - since;
+    if (wait > delay) delay = wait;
+  }
+  scheduleNext(delay);
 }
 
 function rebuild() {
@@ -259,6 +346,16 @@ Pebble.addEventListener('showConfiguration', function () {
   Pebble.openURL(configMod.buildConfigUrl(CONFIG_URL, state.settings));
 });
 
+// True only when the config page actually delivered a non-empty token in THIS
+// response. Inspecting the merged settings instead cannot answer the question:
+// the merge deliberately carries the previous token forward when the page omits
+// it, so `updated.token` is non-empty on virtually every save.
+function deliveredToken(raw) {
+  var o;
+  try { o = JSON.parse(raw); } catch (err) { return false; }
+  return !!(o && typeof o.token === 'string' && o.token);
+}
+
 Pebble.addEventListener('webviewclosed', function (e) {
   if (!e || !e.response) return;
   // Pass the CURRENT settings as the merge base. The config page deliberately
@@ -267,9 +364,8 @@ Pebble.addEventListener('webviewclosed', function (e) {
   // defaults instead of current settings would read that absence as an empty
   // token and silently sign the user out on every settings save.
   // An explicit sign-out arrives as `signOut: true`, not as an empty token.
-  var oldToken = state.settings.token;
-  var updated = configMod.parseConfigResponse(decodeURIComponent(e.response),
-                                              state.settings);
+  var raw = decodeURIComponent(e.response);
+  var updated = configMod.parseConfigResponse(raw, state.settings);
   state.settings = updated;
   saveSettings(updated);
   state.history.reset();
@@ -279,10 +375,15 @@ Pebble.addEventListener('webviewclosed', function (e) {
   // its callback will see a stale generation and drop itself on return
   // instead of re-seeding the history/prevLevel we just reset.
   state.generation += 1;
-  // Only an actual token change clears the sticky dead-token flag -- merely
-  // saving settings (e.g. a layout change) with the same dead token must not
-  // resurrect a doomed polling loop.
-  if (updated.token !== oldToken) {
+  // Any non-empty token delivered by the config page clears the sticky
+  // dead-token flag. Comparing against the OLD token instead looks tighter but
+  // strands the user: re-entering the identical token -- the obvious thing to
+  // try when a token was revoked and then reinstated server-side, or when the
+  // user believes they mistyped -- would leave tokenDead set and the loop
+  // permanently stopped, with signing out as the only escape. A settings save
+  // that carries no token at all (the common case) still cannot resurrect the
+  // loop, which is the property the stickiness exists to protect.
+  if (deliveredToken(raw)) {
     state.tokenDead = false;
   }
   rebuild();
