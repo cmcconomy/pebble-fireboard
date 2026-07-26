@@ -21,6 +21,12 @@ var state = {
   timer: null,
   prevLevel: 0,
   failures: 0,
+  // Sticky: a dead token stays dead until the token value actually changes,
+  // not merely because settings were re-saved (webviewclosed handles that).
+  tokenDead: false,
+  // Bumped on every reconfiguration so an in-flight request started under the
+  // old client/settings can detect it is stale and drop itself on return.
+  generation: 0,
 };
 
 function now() { return Date.now(); }
@@ -76,17 +82,45 @@ function backoffMs() {
   return ms > MAX_BACKOFF_MS ? MAX_BACKOFF_MS : ms;
 }
 
+function normalDelayMs() {
+  return (state.settings.pollSec || 30) * 1000;
+}
+
+// The loop is a self-rescheduling chain (setTimeout), not setInterval, so a
+// failure can widen the gap before the next attempt and a success can return
+// to the steady interval. A dead token (state.tokenDead) refuses to schedule
+// at all until webviewclosed sees the token value actually change.
+function scheduleNext(delayMs) {
+  stopTimer();
+  if (state.tokenDead) return;
+  state.timer = setTimeout(poll, delayMs);
+}
+
 function poll() {
-  if (!state.client) { sendStatus('SIGN IN', false); return; }
-  if (!state.budget.allow()) { sendStatus('PAUSED', false); return; }
+  if (!state.client) { sendStatus('SIGN IN', false); scheduleNext(normalDelayMs()); return; }
+  if (!state.budget.allow()) { sendStatus('PAUSED', false); scheduleNext(normalDelayMs()); return; }
 
   state.budget.record();
+  var gen = state.generation;
   state.client.getDevices(function (err, devices) {
+    // A reconfiguration happened while this request was in flight. Its
+    // result belongs to a client/settings pair that no longer exists —
+    // touching state or history now would re-seed data the user just reset.
+    if (gen !== state.generation) return;
+
     if (err) {
       state.failures += 1;
-      // A dead token is terminal; everything else is worth retrying.
-      if (err.kind === 'bad_token') { stopTimer(); }
+      if (err.kind === 'bad_token') {
+        // Terminal: retrying a dead token against a WAF-gated login endpoint
+        // makes things worse. Stay stopped until the token value changes.
+        state.tokenDead = true;
+        sendStatus(bannerForError(err.kind), false);
+        stopTimer();
+        return;
+      }
+      // Every other error kind backs off and keeps the token.
       sendStatus(bannerForError(err.kind), false);
+      scheduleNext(backoffMs());
       return;
     }
     state.failures = 0;
@@ -101,12 +135,25 @@ function poll() {
         batteryPct: norm.batteryPct, sessionId: norm.sessionId || 0,
         degreetype: norm.degreetype, layout: state.settings.layout,
         cooking: false, showAlertVisuals: state.settings.showAlertVisuals,
-        stale: false,
+        stale: false, mayVibrate: false,
       }));
+      scheduleNext(normalDelayMs());
       return;
     }
 
-    state.history.push(norm.sessionId, norm.probes, t);
+    // history.js documents that callers must pass Fahrenheit; convert every
+    // probe temperature before pushing so the stall band (150-170F) and the
+    // 0.1F/min rate gate are evaluated in the units they were tuned for, even
+    // on a Celsius account. Only temp feeds history's arithmetic.
+    var historyProbes = [];
+    var j;
+    for (j = 0; j < norm.probes.length; j++) {
+      historyProbes.push({
+        channel: norm.probes[j].channel,
+        temp: toF(norm.probes[j].temp, norm.degreetype),
+      });
+    }
+    state.history.push(norm.sessionId, historyProbes, t);
 
     var pitTempF = null;
     var i;
@@ -120,7 +167,12 @@ function poll() {
     var stalledChannels = {};
     for (i = 0; i < norm.probes.length; i++) {
       var ch = norm.probes[i].channel;
-      rates[ch] = state.history.rate(ch);
+      var rateF = state.history.rate(ch);
+      // history now always stores Fahrenheit, so rate() returns F/min.
+      // P_RATE is displayed in the account's own unit (DEGREETYPE), so
+      // convert back for a Celsius account. A rate is a delta: scale by
+      // 5/9 only -- never apply the +32 offset here.
+      rates[ch] = (rateF === null || norm.degreetype !== 1) ? rateF : (rateF * 5 / 9);
       if (ch !== norm.pitChannel) {
         stalledChannels[ch] = state.history.isStalled(ch, t, pitTempF);
       }
@@ -136,6 +188,19 @@ function poll() {
       ? Math.floor((t - norm.lastTemplogMs) / 1000) : 0;
     var elapsedSec = norm.startedMs ? Math.floor((t - norm.startedMs) / 1000) : 0;
 
+    var d = new Date();
+    var vibrate = alertsMod.shouldVibrate(evaluated.level, state.prevLevel, {
+      vibrateEnabled: state.settings.vibrateEnabled,
+      quietHours: state.settings.quietStart === null ? null : {
+        startMinutes: state.settings.quietStart,
+        endMinutes: state.settings.quietEnd,
+      },
+      nowLocalMinutes: d.getHours() * 60 + d.getMinutes(),
+    });
+
+    // The phone owns the vibrate policy (quiet hours, the enabled toggle);
+    // the watch owns the buzz itself, triggering on a rising ALERT_LEVEL only
+    // when MAY_VIBRATE is set. One AppMessage per poll -- no second send.
     send(transform.buildFrame({
       probes: norm.probes,
       pitChannel: norm.pitChannel,
@@ -152,36 +217,24 @@ function poll() {
       cooking: true,
       showAlertVisuals: state.settings.showAlertVisuals,
       stale: stalenessSec > STALE_AFTER_SEC,
+      mayVibrate: vibrate,
     }));
 
-    var d = new Date();
-    var vibrate = alertsMod.shouldVibrate(evaluated.level, state.prevLevel, {
-      vibrateEnabled: state.settings.vibrateEnabled,
-      quietHours: state.settings.quietStart === null ? null : {
-        startMinutes: state.settings.quietStart,
-        endMinutes: state.settings.quietEnd,
-      },
-      nowLocalMinutes: d.getHours() * 60 + d.getMinutes(),
-    });
-    // The watch owns the buzz: it already has ALERT_LEVEL and vibrates on a
-    // rising edge. This flag exists so quiet hours are honoured phone-side.
-    if (!vibrate && evaluated.level > state.prevLevel) {
-      send({ ALERT_LEVEL: 0 });
-    }
     state.prevLevel = evaluated.level;
+    scheduleNext(normalDelayMs());
   });
 }
 
 function stopTimer() {
-  if (state.timer) { clearInterval(state.timer); state.timer = null; }
+  if (state.timer) { clearTimeout(state.timer); state.timer = null; }
 }
 
 function restartTimer() {
   stopTimer();
-  var ms = (state.settings.pollSec || 30) * 1000;
-  var delay = backoffMs();
-  state.timer = setInterval(poll, ms);
-  if (delay === 0) poll();
+  // A dead token refuses to restart the loop at all -- see poll()'s
+  // bad_token handling and webviewclosed's token-change check below.
+  if (state.tokenDead) return;
+  scheduleNext(backoffMs());
 }
 
 function rebuild() {
@@ -214,6 +267,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
   // defaults instead of current settings would read that absence as an empty
   // token and silently sign the user out on every settings save.
   // An explicit sign-out arrives as `signOut: true`, not as an empty token.
+  var oldToken = state.settings.token;
   var updated = configMod.parseConfigResponse(decodeURIComponent(e.response),
                                               state.settings);
   state.settings = updated;
@@ -221,6 +275,16 @@ Pebble.addEventListener('webviewclosed', function (e) {
   state.history.reset();
   state.prevLevel = 0;
   state.failures = 0;
+  // Invalidate any request still in flight under the old client/settings;
+  // its callback will see a stale generation and drop itself on return
+  // instead of re-seeding the history/prevLevel we just reset.
+  state.generation += 1;
+  // Only an actual token change clears the sticky dead-token flag -- merely
+  // saving settings (e.g. a layout change) with the same dead token must not
+  // resurrect a doomed polling loop.
+  if (updated.token !== oldToken) {
+    state.tokenDead = false;
+  }
   rebuild();
   restartTimer();
 });

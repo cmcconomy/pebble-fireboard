@@ -4,7 +4,7 @@ var MAX_LABEL = 16;
 var MAX_BANNER = 64;
 
 var FLAG = { IS_PIT: 1, HAS_ALERT: 2, OUT_OF_BAND: 4, STALLED: 8 };
-var STATE = { COOKING: 1, SHOW_ALERT_VISUALS: 2, STALE: 4 };
+var STATE = { COOKING: 1, SHOW_ALERT_VISUALS: 2, STALE: 4, MAY_VIBRATE: 8 };
 
 function tenths(v) {
   if (v === null || v === undefined) return 0;
@@ -54,6 +54,7 @@ function buildFrame(input) {
   if (input.cooking) stateFlags |= STATE.COOKING;
   if (input.showAlertVisuals) stateFlags |= STATE.SHOW_ALERT_VISUALS;
   if (input.stale) stateFlags |= STATE.STALE;
+  if (input.mayVibrate) stateFlags |= STATE.MAY_VIBRATE;
 
   frame.N_PROBES = ordered.length;
   frame.ELAPSED_SEC = Math.max(0, Math.floor(input.elapsedSec || 0));

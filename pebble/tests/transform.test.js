@@ -66,6 +66,27 @@ test('sets state flags', () => {
   expect(f.STATE_FLAGS & STATE.STALE).toBeFalsy();
 });
 
+test('existing STATE bits keep their historical values', () => {
+  expect(STATE.COOKING).toBe(1);
+  expect(STATE.SHOW_ALERT_VISUALS).toBe(2);
+  expect(STATE.STALE).toBe(4);
+});
+
+test('sets MAY_VIBRATE when mayVibrate is true', () => {
+  const f = buildFrame(Object.assign({}, base, { mayVibrate: true }));
+  expect(f.STATE_FLAGS & STATE.MAY_VIBRATE).toBeTruthy();
+});
+
+test('clears MAY_VIBRATE when mayVibrate is false', () => {
+  const f = buildFrame(Object.assign({}, base, { mayVibrate: false }));
+  expect(f.STATE_FLAGS & STATE.MAY_VIBRATE).toBeFalsy();
+});
+
+test('MAY_VIBRATE defaults to unset when omitted', () => {
+  const f = buildFrame(base);
+  expect(f.STATE_FLAGS & STATE.MAY_VIBRATE).toBeFalsy();
+});
+
 test('idle frame reports no probes and is not cooking', () => {
   const f = buildFrame(Object.assign({}, base, { probes: [], cooking: false }));
   expect(f.N_PROBES).toBe(0);
