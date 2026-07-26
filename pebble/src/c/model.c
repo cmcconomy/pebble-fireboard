@@ -27,6 +27,15 @@ void model_apply_dict(CookModel *m, DictionaryIterator *iter) {
     m->n_probes = (n < 0) ? 0 : (n > FB_MAX_PROBES ? FB_MAX_PROBES : (uint8_t)n);
   }
 
+  // A shrinking frame (e.g. a probe unplugged mid-cook) must not leave stale
+  // data behind in slots that are no longer in use. Zero them before the
+  // per-probe parse loop below so residue from a previous, larger frame can
+  // never survive into a slot at or beyond n_probes. See the contract note
+  // on CookModel.probes in model.h.
+  for (uint8_t i = m->n_probes; i < FB_MAX_PROBES; i++) {
+    memset(&m->probes[i], 0, sizeof(m->probes[i]));
+  }
+
   // Array keys share a base symbol; walk it with an offset. A switch is not
   // possible here because the keys are variables, not constants.
   for (uint8_t i = 0; i < FB_MAX_PROBES; i++) {
@@ -42,7 +51,16 @@ void model_apply_dict(CookModel *m, DictionaryIterator *iter) {
   }
 
   if ((t = dict_find(iter, MESSAGE_KEY_ELAPSED_SEC)))   m->elapsed_sec   = (uint32_t)t->value->int32;
-  if ((t = dict_find(iter, MESSAGE_KEY_STALENESS_SEC))) m->staleness_sec = (uint16_t)t->value->int32;
+  if ((t = dict_find(iter, MESSAGE_KEY_STALENESS_SEC))) {
+    // Clamp, don't truncate: a plain (uint16_t) cast wraps modulo 65536, so
+    // an 18+ hour disconnection (>65535s) would silently wrap to a small
+    // number and read as "freshly updated" -- precisely inverted from the
+    // truth. A saturated 65535 means "very stale"; the display treats
+    // anything beyond a couple of minutes as offline anyway, so saturating
+    // loses no real information.
+    int32_t s = t->value->int32;
+    m->staleness_sec = (s < 0) ? 0 : (s > UINT16_MAX ? UINT16_MAX : (uint16_t)s);
+  }
   if ((t = dict_find(iter, MESSAGE_KEY_FB_BATTERY)))    m->fb_battery    = (uint8_t)t->value->int32;
   if ((t = dict_find(iter, MESSAGE_KEY_SESSION_ID)))    m->session_id    = (uint32_t)t->value->int32;
   if ((t = dict_find(iter, MESSAGE_KEY_ALERT_LEVEL)))   m->alert_level   = (uint8_t)t->value->int32;

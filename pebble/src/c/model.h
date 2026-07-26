@@ -12,6 +12,11 @@ typedef struct {
 } ProbeView;
 
 typedef struct {
+  // Contract: only probes[0 .. n_probes-1] are meaningful. Consumers MUST
+  // iterate `i < n_probes` and never read beyond it. Slots at or above
+  // n_probes are explicitly zeroed by model_apply_dict on every update (so a
+  // frame with fewer probes than the previous one cannot leave stale data
+  // behind) and carry no meaning.
   ProbeView probes[FB_MAX_PROBES];
   uint8_t   n_probes;
   uint32_t  elapsed_sec;
