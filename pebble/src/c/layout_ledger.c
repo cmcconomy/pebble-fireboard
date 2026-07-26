@@ -11,16 +11,46 @@
 #define ZONE_FOOTER_H    10
 #define ZONE_BANNER_H    12
 
+// Idle (not-cooking) zones. The clock rides higher when a banner must share
+// the screen with it.
+#define ZONE_IDLE_CLOCK_Y         28
+#define ZONE_IDLE_CLOCK_Y_BANNER  22
+// 44px time row + 20px date row + 4px gap. Fixed, because widget_draw_clock's
+// fonts are fixed pixel sizes and do not scale with screen height.
+#define IDLE_CLOCK_BLOCK_H        68
+#define IDLE_BANNER_MIN_H         18
+
 void layout_ledger_draw(GContext *ctx, GRect b, const CookModel *m) {
   bool cooking = model_is_cooking(m);
   bool stale = model_is_stale(m);
   bool show_alerts = model_show_alerts(m);
 
   if (!cooking) {
-    // Idle: a plain, full-size clock. Nothing about FireBoard on screen.
-    int y = b.origin.y + widget_pct_of(b.size.h, 28);
-    widget_draw_clock(ctx, GRect(b.origin.x, y, b.size.w,
-                                 b.size.h - (y - b.origin.y)), true);
+    // Idle: a plain, full-size clock. Nothing about FireBoard on screen —
+    // UNLESS the phone sent a banner. Every error state (NO SIGNAL, SIGN IN
+    // AGAIN, PAUSED, TRY AGAIN LATER) arrives as not-cooking plus a banner;
+    // returning early here made all of them render as a bare clock, so a cook
+    // could silently vanish for an hour with nothing on screen to say why.
+    bool has_banner = (m->banner[0] != '\0');
+    int banner_h = widget_pct_of(b.size.h, ZONE_BANNER_H);
+    if (banner_h < IDLE_BANNER_MIN_H) banner_h = IDLE_BANNER_MIN_H;
+    // Lift the clock when a banner shares the screen so the two cannot
+    // overlap. The large clock's glyphs are a FIXED pixel height (a 44px time
+    // row over a 20px date row), not a percentage, so the reserved block is a
+    // constant too -- a percentage here would collide on the shorter screens.
+    int y = b.origin.y + widget_pct_of(b.size.h,
+                has_banner ? ZONE_IDLE_CLOCK_Y_BANNER : ZONE_IDLE_CLOCK_Y);
+    int clock_h = has_banner ? IDLE_CLOCK_BLOCK_H
+                             : (b.size.h - (y - b.origin.y));
+    widget_draw_clock(ctx, GRect(b.origin.x, y, b.size.w, clock_h), true);
+
+    if (has_banner) {
+      // Same inversion rule as the cooking branch: inverted means "needs you",
+      // so SIGN IN AGAIN reads as urgent while PAUSED stays plain information.
+      bool invert = show_alerts && m->alert_level >= FB_LEVEL_WARN;
+      widget_draw_banner(ctx, GRect(b.origin.x, y + clock_h, b.size.w, banner_h),
+                         m->banner, invert);
+    }
     return;
   }
 
@@ -46,7 +76,7 @@ void layout_ledger_draw(GContext *ctx, GRect b, const CookModel *m) {
     if (y + needed > body_limit) break;      // never overflow into the footer
 
     widget_draw_probe_row(ctx, GRect(b.origin.x, y, b.size.w, row_h), p,
-                          show_alerts, stale);
+                          show_alerts, stale, m->degreetype);
     y += row_h;
 
     if (has_band) {
