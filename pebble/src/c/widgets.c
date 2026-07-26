@@ -12,21 +12,37 @@ static void format_temp(char *buf, size_t cap, int16_t tenths, bool parens) {
   }
 }
 
-// flint/aplite/diorite are 1-bit. Grey must be dithered. Used only for the
-// stale band fill — never behind text, where a checkerboard destroys
+// flint/aplite/diorite are 1-bit. Grey must be simulated. Used only for the
+// stale band fill — never behind text, where any texture destroys
 // legibility at 144x168.
-static void fill_dithered(GContext *ctx, GRect r) {
+//
+// A 45-degree hatch (lines spaced ~2px apart in diagonal offset) reads as
+// grey at watch viewing distance while costing O(width+height) draw_line
+// calls, versus the O(width*height) draw_pixel calls a checkerboard needs.
+// For a realistic band rect this is roughly a dozen line calls instead of
+// several hundred pixel calls, which matters because this runs from
+// update_proc on every redraw for as long as a probe stays stale (hours).
+static void fill_hatched(GContext *ctx, GRect r) {
   graphics_context_set_stroke_color(ctx, GColorWhite);
-  for (int y = r.origin.y; y < r.origin.y + r.size.h; y++) {
-    for (int x = r.origin.x; x < r.origin.x + r.size.w; x++) {
-      if (((x + y) & 1) == 0) {
-        graphics_draw_pixel(ctx, GPoint(x, y));
-      }
-    }
+  int w = r.size.w;
+  int h = r.size.h;
+  // k is the diagonal offset (x - y) of each hatch line, in rect-local
+  // coordinates. Stepping by 2 keeps the lines visibly separated (not solid)
+  // while still reading as a filled band (not empty).
+  for (int k = -(h - 1); k <= w - 1; k += 2) {
+    int x0 = k > 0 ? k : 0;
+    int x1 = (k + h - 1) < (w - 1) ? (k + h - 1) : (w - 1);
+    if (x0 > x1) continue;
+    int y0 = x0 - k;
+    int y1 = x1 - k;
+    graphics_draw_line(ctx, GPoint(r.origin.x + x0, r.origin.y + y0),
+                             GPoint(r.origin.x + x1, r.origin.y + y1));
   }
 }
 
 void widget_draw_clock(GContext *ctx, GRect area, bool large) {
+  // static: reused across calls to avoid per-frame heap churn; safe only
+  // because Pebble's draw path is synchronous and single-threaded.
   static char s_time[8];
   static char s_date[24];
   time_t now = time(NULL);
@@ -69,6 +85,8 @@ void widget_draw_probe_row(GContext *ctx, GRect area, const ProbeView *p,
     graphics_context_set_text_color(ctx, GColorWhite);
   }
 
+  // static: reused across calls; safe only because Pebble's draw path is
+  // synchronous and single-threaded (no concurrent writers).
   static char label[FB_LABEL_MAX];
   strncpy(label, p->label, FB_LABEL_MAX - 1);
   label[FB_LABEL_MAX - 1] = '\0';
@@ -81,6 +99,8 @@ void widget_draw_probe_row(GContext *ctx, GRect area, const ProbeView *p,
                            area.size.w / 2, area.size.h),
                      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 
+  // static: safe only because Pebble's draw path is synchronous and
+  // single-threaded.
   static char value[16];
   format_temp(value, sizeof(value), p->temp_tenths, stale);
 
@@ -88,6 +108,8 @@ void widget_draw_probe_row(GContext *ctx, GRect area, const ProbeView *p,
   // a stale reading must not look like it is still moving.
   bool show_rate = !stale && !(p->flags & FB_FLAG_HAS_ALERT);
   if (show_rate) {
+    // static: safe only because Pebble's draw path is synchronous and
+    // single-threaded.
     static char combined[28];
     int r = p->rate_tenths;
     snprintf(combined, sizeof(combined), "%s  %s%d.%d", value,
@@ -122,10 +144,14 @@ void widget_draw_band(GContext *ctx, GRect area, const ProbeView *p, bool stale)
   if (frac < 0) frac = 0;
 
   GRect fill = GRect(area.origin.x + 2, area.origin.y + 2, frac, area.size.h - 4);
-  if (fill.size.w <= 0) return;
+  // Guard both dimensions before any fill call: a caller passing a band
+  // area shorter than 4px (plausible on a round platform's tightly-inset
+  // layout) would otherwise produce a negative-height GRect, whose
+  // behaviour in graphics_fill_rect is unspecified/platform-dependent.
+  if (fill.size.w <= 0 || fill.size.h <= 0) return;
 
   if (stale) {
-    fill_dithered(ctx, fill);
+    fill_hatched(ctx, fill);
   } else {
     graphics_context_set_fill_color(ctx, GColorWhite);
     graphics_fill_rect(ctx, fill, 0, GCornerNone);
@@ -148,6 +174,8 @@ void widget_draw_banner(GContext *ctx, GRect area, const char *text, bool invert
 
 void widget_draw_footer(GContext *ctx, GRect area, uint32_t elapsed_sec,
                         uint16_t staleness_sec, bool stale) {
+  // static: reused across calls; safe only because Pebble's draw path is
+  // synchronous and single-threaded.
   static char left[16];
   static char right[16];
   graphics_context_set_text_color(ctx, GColorWhite);
