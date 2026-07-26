@@ -333,15 +333,53 @@ test('re-entering the identical dead token revives the poll loop', () => {
   expect(last().N_PROBES).toBe(1);
 });
 
-test('saving settings with no token does not revive a dead token', () => {
+// This path has now been wrong in two opposite directions -- once leaving the
+// flag set when it should clear, once clearing it when it should stay set --
+// so all three config-response shapes are pinned explicitly. `signOut` and
+// `token` are mutually exclusive on the wire: the config page sends one or the
+// other, never both.
+
+// Kill the loop with a bad_token error, then return the API to health so any
+// revival is immediately visible as a real poll.
+function stranded() {
   boot();
   mockApi.error = { kind: 'bad_token' };
   nextPoll();
-  const stopped = sent.length;
-
+  expect(last().BANNER).toBe('SIGN IN AGAIN');
   mockApi.error = null;
   mockApi.devices = deviceFn({ channels: [ch(1, 'pit', 200)] });
-  saveSettings({ layout: 1 });                    // no token key at all
+  return sent.length;
+}
+
+test('(a) a settings-only save leaves a dead token dead', () => {
+  const stopped = stranded();
+  saveSettings({ layout: 1 });                    // no token, no signOut
   jest.advanceTimersByTime(60000);
   expect(sent.length).toBe(stopped);
+});
+
+test('(b) an explicit sign-out clears the dead-token flag', () => {
+  // signOut carries NO token key, so a delivered-token test alone would strand
+  // the user on the stale SIGN IN AGAIN banner forever.
+  const stopped = stranded();
+  saveSettings({ signOut: true });
+  jest.advanceTimersByTime(60000);
+  expect(sent.length).toBeGreaterThan(stopped);
+  // Signed out means no client, so the loop asks for credentials afresh
+  // rather than repeating the dead-token complaint.
+  expect(last().BANNER).toBe('SIGN IN');
+});
+
+test('(c) a new non-empty token clears the dead-token flag', () => {
+  const stopped = stranded();
+  saveSettings({ token: 'a-brand-new-token' });
+  jest.advanceTimersByTime(60000);
+  expect(sent.length).toBeGreaterThan(stopped);
+  expect(last().N_PROBES).toBe(1);
+});
+
+test('a sign-out actually clears the stored token', () => {
+  stranded();
+  saveSettings({ signOut: true });
+  expect(JSON.parse(store['fb.settings']).token).toBe('');
 });

@@ -346,14 +346,25 @@ Pebble.addEventListener('showConfiguration', function () {
   Pebble.openURL(configMod.buildConfigUrl(CONFIG_URL, state.settings));
 });
 
-// True only when the config page actually delivered a non-empty token in THIS
-// response. Inspecting the merged settings instead cannot answer the question:
-// the merge deliberately carries the previous token forward when the page omits
-// it, so `updated.token` is non-empty on virtually every save.
-function deliveredToken(raw) {
+// True when THIS config response changed the credential situation, either by
+// delivering a non-empty token or by explicitly signing out. Inspecting the
+// merged settings instead cannot answer the question: the merge deliberately
+// carries the previous token forward when the page omits the key, so
+// `updated.token` is non-empty on virtually every save.
+//
+// `signOut` and `token` are mutually exclusive on the wire -- the config page
+// sends one or the other, never both (see the Save handler in
+// config/index.html) -- so a sign-out carries NO token key and must be
+// recognised on its own. Testing only for a delivered token strands the user
+// on the stale SIGN IN AGAIN banner after signing out, with entering a brand
+// new token as the sole escape: exactly what someone who just signed out is
+// not about to do.
+function credentialChanged(raw) {
   var o;
   try { o = JSON.parse(raw); } catch (err) { return false; }
-  return !!(o && typeof o.token === 'string' && o.token);
+  if (!o) return false;
+  if (o.signOut === true) return true;
+  return !!(typeof o.token === 'string' && o.token);
 }
 
 Pebble.addEventListener('webviewclosed', function (e) {
@@ -375,15 +386,14 @@ Pebble.addEventListener('webviewclosed', function (e) {
   // its callback will see a stale generation and drop itself on return
   // instead of re-seeding the history/prevLevel we just reset.
   state.generation += 1;
-  // Any non-empty token delivered by the config page clears the sticky
-  // dead-token flag. Comparing against the OLD token instead looks tighter but
-  // strands the user: re-entering the identical token -- the obvious thing to
-  // try when a token was revoked and then reinstated server-side, or when the
-  // user believes they mistyped -- would leave tokenDead set and the loop
-  // permanently stopped, with signing out as the only escape. A settings save
-  // that carries no token at all (the common case) still cannot resurrect the
-  // loop, which is the property the stickiness exists to protect.
-  if (deliveredToken(raw)) {
+  // A changed credential situation clears the sticky dead-token flag: either a
+  // non-empty token (including the IDENTICAL one -- the obvious thing to try
+  // when a token was revoked and then reinstated server-side) or an explicit
+  // sign-out, after which the loop should fall back to the SIGN IN banner
+  // rather than stay frozen on SIGN IN AGAIN. A settings save that carries
+  // neither (the common case) still cannot resurrect the loop, which is the
+  // property the stickiness exists to protect.
+  if (credentialChanged(raw)) {
     state.tokenDead = false;
   }
   rebuild();
