@@ -1,0 +1,23 @@
+# Credentials — never commit
+.env
+tools/.env
+*.token
+
+# Captured API responses may contain account identifiers
+docs/research/api-shapes.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# Pebble build output
+pebble/build/
+pebble/node_modules/
+pebble/.lock-waf*
+
+.DS_Store
+
+# Brainstorming companion mockups
+.superpowers/
