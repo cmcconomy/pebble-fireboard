@@ -176,6 +176,9 @@ also works with zero network requirements.
 - **Message keys are `extern uint32_t` variables, NOT `#define` constants.** They cannot appear in
   `switch`/`case` labels, static initialisers, or any constant expression. Use an `if`/`dict_find`
   chain (as tokenwatch does) or a loop over a base key.
+- **PebbleKit JS serialises every plain number as a 32-bit integer.** Reading `t->value->int16` (or
+  `uint8`) from a tuple that JS wrote returns garbage. **Always read `->int32` / `->uint32` in C and
+  narrow with a cast.** This bites silently — small values often look right until one exceeds a byte.
 - Installed SDK is **4.9.169**, but the toolchain reports **4.17 available** — these constants were
   verified against 4.9.169 only. Re-check if you upgrade.
 
