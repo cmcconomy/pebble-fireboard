@@ -1,0 +1,57 @@
+{
+  "name": "fireboard",
+  "author": "Craig McConomy",
+  "version": "0.1.0",
+  "private": true,
+  "keywords": [
+    "pebble-app"
+  ],
+  "scripts": {
+    "test": "jest"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
+  },
+  "pebble": {
+    "displayName": "FireBoard",
+    "uuid": "4b61a13e-a2ff-48f8-9d62-66c331486c52",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "targetPlatforms": [
+      "aplite",
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery",
+      "flint",
+      "gabbro"
+    ],
+    "watchapp": {
+      "watchface": true
+    },
+    "capabilities": [
+      "configurable"
+    ],
+    "messageKeys": [
+      "P_LABEL[4]",
+      "P_TEMP[4]",
+      "P_MIN[4]",
+      "P_MAX[4]",
+      "P_RATE[4]",
+      "P_FLAGS[4]",
+      "N_PROBES",
+      "ELAPSED_SEC",
+      "STALENESS_SEC",
+      "FB_BATTERY",
+      "SESSION_ID",
+      "ALERT_LEVEL",
+      "BANNER",
+      "LAYOUT",
+      "DEGREETYPE",
+      "STATE_FLAGS"
+    ],
+    "resources": {
+      "media": []
+    }
+  }
+}
