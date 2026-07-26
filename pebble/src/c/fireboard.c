@@ -46,7 +46,11 @@ static void inbox_dropped(AppMessageResult reason, void *ctx) {
 static void window_load(Window *w) {
   window_set_background_color(w, GColorBlack);
   ui_create(w);
-  model_init(&s_model);
+  // s_model deliberately survives a window reload (the OS can unload/reload
+  // this window's layers behind a modal or notification while the app keeps
+  // running). Re-initializing it here would blank a live cook mid-alert.
+  // ui_create() just reset the UI's own copy, so this repaints it with the
+  // still-live data rather than resetting it.
   ui_set_model(&s_model);
   tick_timer_service_subscribe(MINUTE_UNIT, tick_handler);
 }
